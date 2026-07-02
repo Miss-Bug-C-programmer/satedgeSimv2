@@ -50,6 +50,8 @@ public class ExternalRLOrchestrator extends Orchestrator {
 
     @Override
     public void resultsReturned(Task task) {
-        // Hook for future per-task feedback. Aggregate metrics are exposed by /get_metrics.
+        if (bridge != null && !bridge.isClosed()) {
+            bridge.recordCompletion(task, simulationManager);
+        }
     }
 }

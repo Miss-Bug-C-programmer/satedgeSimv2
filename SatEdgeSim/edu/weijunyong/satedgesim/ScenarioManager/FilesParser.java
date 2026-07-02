@@ -43,14 +43,14 @@ public class FilesParser {
 	
 	private boolean checkcSVFiles(String csvFile) {
 		SimLog.println("FilesParser- Checking file: " + csvFile);
-		if (csvFile == simulationParameters.CloudlocationFile) {
+		if (csvFile.equals(simulationParameters.CloudlocationFile)) {
 			simulationParameters.Cloudlocationinfo = Getlocationinfo(csvFile);
 			return checklocationinfo(simulationParameters.Cloudlocationinfo,csvFile);
 		}
-		else if (csvFile == simulationParameters.EdgeDataCenterslocationFile) {
+		else if (csvFile.equals(simulationParameters.EdgeDataCenterslocationFile)) {
 			simulationParameters.EdgeDataCenterslocationinfo = Getlocationinfo(csvFile);
 			return checklocationinfo(simulationParameters.EdgeDataCenterslocationinfo,csvFile);
-		} else if (csvFile == simulationParameters.EdgeDeviceslocationFile){
+		} else if (csvFile.equals(simulationParameters.EdgeDeviceslocationFile)){
 			simulationParameters.EdgeDeviceslocationinfo = Getlocationinfo(csvFile);
 			return checklocationinfo(simulationParameters.EdgeDeviceslocationinfo,csvFile);
 		}
@@ -191,14 +191,14 @@ public class FilesParser {
 			simulationParameters.AMPLIFIER_DISSIPATION_MULTIPATH = Double
 					.parseDouble(prop.getProperty("amplifier_dissipation_multipath").trim()); // J/bit/m^4
 
+			result = true;
+			SimLog.println("FilesParser- Properties file successfully Loaded!");
 		} catch (IOException ex) {
 			ex.printStackTrace();
 		} finally {
 			if (input != null) {
 				try {
 					input.close();
-					result = true;
-					SimLog.println("FilesParser- Properties file successfully Loaded propoerties file!");
 				} catch (IOException e) {
 					e.printStackTrace();
 				}

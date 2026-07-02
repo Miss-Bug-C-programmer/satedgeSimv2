@@ -60,19 +60,20 @@ public class DefaultEnergyModel extends EnergyModel {
 		if (flag == RECEPTION)
 			receptionEnergyConsumption(sizeInBits);
 		else
-			transmissionEnergyConsumption(sizeInBits, distance);
+			transmissionEnergyConsumption(sizeInBits, distance, file == null ? 1.0 : file.getTxPowerRatioClamped());
 	}
 
-	private void transmissionEnergyConsumption(int sizeInBits, double distance) {
+	private void transmissionEnergyConsumption(int sizeInBits, double distance, double txPowerRatio) {
 		double consumption = 0;
+		double powerRatio = Math.max(0.10, Math.min(1.0, txPowerRatio));
 
 		// distance threshold that determines the multipath and free space choices.
 		double D_0 = Math.sqrt(E_fs / E_mp);
 
 		if (distance <= D_0)
-			consumption = (E_elec * sizeInBits) + (E_fs * Math.pow(distance, 2) * sizeInBits);
+			consumption = ((E_elec * sizeInBits) + (E_fs * Math.pow(distance, 2) * sizeInBits)) * powerRatio;
 		else if (distance > D_0)
-			consumption = (E_elec * sizeInBits) + (E_mp * Math.pow(distance, 4) * sizeInBits);
+			consumption = ((E_elec * sizeInBits) + (E_mp * Math.pow(distance, 4) * sizeInBits)) * powerRatio;
 		this.wirelessEnergyConsumption += joulToWattHour(consumption);
 	}
 

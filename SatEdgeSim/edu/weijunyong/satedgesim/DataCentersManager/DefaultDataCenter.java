@@ -28,16 +28,15 @@ public class DefaultDataCenter extends DataCenter {
 				updateEnergyConsumption();
 				
 
-				// Update location
-				if (isMobile()) {
+				// Update location for all node types (LEO/GEO orbit, ground rotation)
+				{
 					simulationParameters.TYPES type = this.getType();
-					String typestring = null;
+					String typestring;
 					if (type == simulationParameters.TYPES.CLOUD) {
 						typestring = "cloud";
 					} else if (type == simulationParameters.TYPES.EDGE_DATACENTER) {
 						typestring = "edge";
-					}
-					else {
+					} else {
 						typestring = "mist";
 					}
 					getMobilityManager().getNextLocation(this.getDeviceID(),simulationManager.getSimulation().clock(),typestring);

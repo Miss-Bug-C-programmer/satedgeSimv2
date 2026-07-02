@@ -326,7 +326,7 @@ public class SimLog {
 		print("SimLog- Average remaining power (devices with batteries that are still alive)   :"
 				+ padLeftSpaces(decimalFormat.format(averageRemainingPowerWh), 15) + " Wh (Average: "
 				+ decimalFormat.format(averageRemainingPower) + " %)");
-		print("SimulationManager- the Scenario Simulation overflow times :"+SimulationManager.overflowtime);
+		print("SimulationManager- the Scenario Simulation overflow times :"+simulationManager.getOverflowtime());
 		if (firstDeviceDeathTime != -1)
 			print("SimLog- First device died at                                                 :"
 					+ padLeftSpaces("" + firstDeviceDeathTime, 15) + " seconds");

@@ -29,6 +29,7 @@ import com.sun.net.httpserver.HttpServer;
 public class SatEdgeSimRestServer {
     private final Gson gson = new Gson();
     private final ServerConfig config;
+    private final Object sessionLock = new Object();
     private volatile SatEdgeSimSession session;
 
     public SatEdgeSimRestServer(ServerConfig config) {
@@ -56,11 +57,14 @@ public class SatEdgeSimRestServer {
             protected JsonResponse handleJson(HttpExchange exchange, String body) throws Exception {
                 requireMethod(exchange, "POST");
                 ResetRequest request = body.trim().isEmpty() ? new ResetRequest() : gson.fromJson(body, ResetRequest.class);
-                if (session != null) {
-                    session.close();
+                SatEdgeSimSession newSession;
+                synchronized (sessionLock) {
+                    if (session != null) {
+                        session.close();
+                    }
+                    newSession = new SatEdgeSimSession(config, request);
+                    session = newSession;
                 }
-                SatEdgeSimSession newSession = new SatEdgeSimSession(config, request);
-                session = newSession;
                 newSession.start();
                 return ok(newSession.getState());
             }
@@ -118,9 +122,11 @@ public class SatEdgeSimRestServer {
             @Override
             protected JsonResponse handleJson(HttpExchange exchange, String body) {
                 requireMethod(exchange, "POST");
-                if (session != null) {
-                    session.close();
-                    session = null;
+                synchronized (sessionLock) {
+                    if (session != null) {
+                        session.close();
+                        session = null;
+                    }
                 }
                 Map<String, Object> response = new LinkedHashMap<String, Object>();
                 response.put("status", "CLOSED");

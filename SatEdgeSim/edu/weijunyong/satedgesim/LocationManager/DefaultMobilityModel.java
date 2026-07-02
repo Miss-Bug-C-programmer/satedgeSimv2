@@ -19,11 +19,9 @@ public class DefaultMobilityModel extends Mobility {
 		//String FID = Integer.toString(ID);
 		//String fileName = null;
 		double[] locationPos;
-		if (type == "cloud") {
-			//fileName = MainApplication.getLocationFolder() + "cloud/cloud Fixed Position.csv";
+		if ("cloud".equals(type)) {
 			locationPos= ServersManager.Setnodelocation(simulationParameters.Cloudlocationinfo,ID,time);
-		} else if (type == "edge") {
-			//fileName = MainApplication.getLocationFolder() + "edge_datacenter/edge Fixed Position.csv";
+		} else if ("edge".equals(type)) {
 			locationPos= ServersManager.Setnodelocation(simulationParameters.EdgeDataCenterslocationinfo,ID,time);
 		} else {
 			//fileName = MainApplication.getLocationFolder() + "edge_devices/mist Fixed Position.csv";

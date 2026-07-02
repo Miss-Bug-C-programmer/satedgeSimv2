@@ -9,6 +9,7 @@ import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
 import edu.weijunyong.satedgesim.SimulationManager.SimLog;
 import edu.weijunyong.satedgesim.SimulationManager.SimulationManager;
 import edu.weijunyong.satedgesim.TasksGenerator.Task;
+import edu.weijunyong.satedgesim.server.RlNativeResourceBindingManager;
 
 public class DefaultNetworkModel extends NetworkModel {
 
@@ -53,15 +54,21 @@ public class DefaultNetworkModel extends NetworkModel {
 		return transferProgressList;
 	}
 
+	private FileTransferProgress newTransfer(Task task, double remainingFileSize, FileTransferProgress.Type type) {
+		FileTransferProgress transfer = new FileTransferProgress(task, remainingFileSize, type);
+		RlNativeResourceBindingManager.attachToTransfer(transfer);
+		return transfer;
+	}
+
 	public void sendRequestFromOrchToDest(Task task) {
 		transferProgressList
-				.add(new FileTransferProgress(task, task.getFileSize() * 8, FileTransferProgress.Type.TASK));
+				.add(newTransfer(task, task.getFileSize() * 8, FileTransferProgress.Type.TASK));
 	}
 
 	public void sendResultFromOrchToDev(Task task) {
 		if (task.getOrchestrator() != task.getEdgeDevice())
 			transferProgressList.add(
-					new FileTransferProgress(task, task.getOutputSize() * 8, FileTransferProgress.Type.RESULTS_TO_DEV));
+					newTransfer(task, task.getOutputSize() * 8, FileTransferProgress.Type.RESULTS_TO_DEV));
 		else
 			scheduleNow(simulationManager, SimulationManager.RESULT_RETURN_FINISHED, task);
 	}
@@ -69,7 +76,7 @@ public class DefaultNetworkModel extends NetworkModel {
 	public void sendResultFromDevToOrch(Task task) {
 		//if (task.getOrchestrator() != task.getEdgeDevice())
 		if (task.getOrchestrator() != (DataCenter)task.getVm().getHost().getDatacenter())
-			transferProgressList.add(new FileTransferProgress(task, task.getOutputSize() * 8,
+			transferProgressList.add(newTransfer(task, task.getOutputSize() * 8,
 					FileTransferProgress.Type.RESULTS_TO_ORCH));
 		else
 			scheduleNow(this, DefaultNetworkModel.SEND_RESULT_FROM_ORCH_TO_DEV, task);
@@ -77,13 +84,13 @@ public class DefaultNetworkModel extends NetworkModel {
 
 	public void addContainer(Task task) {
 		transferProgressList
-				.add(new FileTransferProgress(task, task.getContainerSize() * 8, FileTransferProgress.Type.CONTAINER));
+				.add(newTransfer(task, task.getContainerSize() * 8, FileTransferProgress.Type.CONTAINER));
 	}
 
 	public void sendRequestFromDeviceToOrch(Task task) {
 		if (task.getOrchestrator() != task.getEdgeDevice())  //协调器非本设备
 			transferProgressList
-					.add(new FileTransferProgress(task, task.getFileSize() * 8, FileTransferProgress.Type.REQUEST));
+					.add(newTransfer(task, task.getFileSize() * 8, FileTransferProgress.Type.REQUEST));
 		else // The device orchestrate its tasks by itself, so, send the request directly to
 				// destination
 			scheduleNow(simulationManager, SimulationManager.SEND_TASK_FROM_ORCH_TO_DESTINATION, task);
@@ -109,8 +116,10 @@ public class DefaultNetworkModel extends NetworkModel {
 					}
 				}
 				// allocate bandwidths
-				transferProgressList.get(i).setLanBandwidth(getLanBandwidth(remainingTransfersCount_Lan));
-				transferProgressList.get(i).setWanBandwidth(getWanBandwidth(remainingTransfersCount_Wan));
+				FileTransferProgress transfer = transferProgressList.get(i);
+				double bandwidthShare = Math.max(0.10, Math.min(1.0, transfer.getBandwidthShareClamped()));
+				transfer.setLanBandwidth(getLanBandwidth(remainingTransfersCount_Lan) * bandwidthShare);
+				transfer.setWanBandwidth(getWanBandwidth(remainingTransfersCount_Wan) * bandwidthShare);
 				updateBandwidth(transferProgressList.get(i));
 				updateTransfer(transferProgressList.get(i));
 			}

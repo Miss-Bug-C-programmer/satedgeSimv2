@@ -290,7 +290,12 @@ public class SatEdgeSimSession {
 
     public Map<String, Object> getLastReceiptDebug() {
         ExecutionReceipt receipt = bridge.getLastExecutionReceipt();
-        return receipt == null ? new LinkedHashMap<String, Object>() : receipt.toMap();
+        Map<String, Object> out = receipt == null ? new LinkedHashMap<String, Object>() : receipt.toMap();
+        RlCompletionReceipt completion = bridge.getLastCompletionReceipt();
+        if (completion != null) {
+            out.put("completionReceipt", completion.toMap());
+        }
+        return out;
     }
 
     public Map<String, Object> getReceiptStats() {
@@ -322,6 +327,15 @@ public class SatEdgeSimSession {
         result.put("energyCounterSemantics", "cumulative_total_across_all_datacenters");
         result.put("energyCounterIsCumulative", true);
         result.put("energyCounterLabelWarning", "SimLog legacy labels say W/dBW, but the implementation accumulates energy counter deltas in Wh.");
+        RlCompletionReceipt completion = bridge.getLastCompletionReceipt();
+        result.put("completionReceiptAvailable", completion != null);
+        if (completion != null) {
+            result.put("lastCompletionReceipt", completion.toMap());
+        }
+        result.put("completionReceipts", bridge.getCompletionReceiptMaps());
+        Map<String, Object> binding = RlResourceBindingAudit.metadata(
+                receiptProfileOrCandidate(bridge.getLastExecutionReceipt()));
+        result.putAll(binding);
         result.put("scenarioProfile", simulationParameters.RL_SCENARIO_PROFILE);
         result.put("taskSourceMode", simulationParameters.RL_TASK_SOURCE_MODE);
         result.put("successProfile", simulationParameters.RL_SUCCESS_PROFILE);
@@ -329,6 +343,13 @@ public class SatEdgeSimSession {
         result.put("minLinkSurvivalMarginSec", simulationParameters.RL_MIN_LINK_SURVIVAL_MARGIN_SEC);
         result.put("isControlledRlScenario", simulationParameters.RL_IS_CONTROLLED_SCENARIO);
         return result;
+    }
+
+    private RlResourceProfile receiptProfileOrCandidate(ExecutionReceipt receipt) {
+        if (receipt != null && receipt.resourceProfile != null) {
+            return receipt.resourceProfile;
+        }
+        return RlResourceProfile.fromAction(null, RlResourceBindingMode.candidate_only);
     }
 
     public void close() {

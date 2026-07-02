@@ -71,29 +71,23 @@ public class ServersManager {
 	}
 
 	private void selectOrchestrators() {
+		String deploy = simulationParameters.DEPLOY_ORCHESTRATOR;
+		if (!"".equals(deploy) && !"CLOUD".equals(deploy) && !"EDGE".equals(deploy) && !"MIST".equals(deploy)) {
+			SimLog.println("");
+			SimLog.println("ServersManager- Unknown orchestration deploy '" + deploy
+					+ "', please check the simulation parameters file...");
+			simulationParameters.abort("SatEdgeSim requested termination");
+			return;
+		}
 		for (DataCenter edgeDataCenter : datacentersList) {
-			if ("".equals(simulationParameters.DEPLOY_ORCHESTRATOR)
-					|| ("CLOUD".equals(simulationParameters.DEPLOY_ORCHESTRATOR)
-							&& edgeDataCenter.getType() == simulationParameters.TYPES.CLOUD)) {
+			if ("".equals(deploy)
+					|| ("CLOUD".equals(deploy) && edgeDataCenter.getType() == simulationParameters.TYPES.CLOUD)
+					|| ("EDGE".equals(deploy) && edgeDataCenter.getType() == simulationParameters.TYPES.EDGE_DATACENTER)
+					|| ("MIST".equals(deploy) && edgeDataCenter.getType() == simulationParameters.TYPES.EDGE_DEVICE)) {
 				edgeDataCenter.setOrchestrator(true);
 				orchestratorsList.add(edgeDataCenter);
-			} else if ("EDGE".equals(simulationParameters.DEPLOY_ORCHESTRATOR)
-					&& edgeDataCenter.getType() == simulationParameters.TYPES.EDGE_DATACENTER) {
-				edgeDataCenter.setOrchestrator(true);
-				orchestratorsList.add(edgeDataCenter);
-			} else if ("MIST".equals(simulationParameters.DEPLOY_ORCHESTRATOR)
-					&& edgeDataCenter.getType() == simulationParameters.TYPES.EDGE_DEVICE) {
-				edgeDataCenter.setOrchestrator(true);
-				orchestratorsList.add(edgeDataCenter);
-			} else {
-				SimLog.println("");
-				SimLog.println("ServersManager- Unknnown orchestration deploy '" + simulationParameters.DEPLOY_ORCHESTRATOR
-						+ "', please check the simulation parameters file...");
-				// Cancel the simulation
-				simulationParameters.abort("SatEdgeSim requested termination");
 			}
 		}
-
 	}
 
 	public void generateEdgeDevices() throws Exception {

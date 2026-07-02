@@ -27,7 +27,7 @@ public class SimulationManager extends CloudSimEntity {
 	public static final int RESULT_RETURN_FINISHED = Base + 5;
 	public static final int SEND_TO_ORCH = Base + 6;
 	public static final int UPDATE_REAL_TIME_CHARTS = Base + 7;
-	public static int overflowtime=0;
+	private int overflowtime=0;
 	private CustomBroker broker;
 	private List<Task> tasksList;
 	private Orchestrator edgeOrchestrator;
@@ -283,10 +283,10 @@ public class SimulationManager extends CloudSimEntity {
 			else {
 				// Send the offloading request to the closest orchestrator
 				double min = -1;
-				int selected = 0;
+				int selected = -1;
 				double distance;
 				for (int i = 0; i < orchestratorsList.size(); i++) {
-					if (orchestratorsList.get(i).getType() == type 
+					if (orchestratorsList.get(i).getType() == type
 							&& issetlink(task.getEdgeDevice(),orchestratorsList.get(i))) {
 						distance = getdistance(task.getEdgeDevice(),orchestratorsList.get(i));
 						if (min == -1 || min > distance) {
@@ -295,8 +295,11 @@ public class SimulationManager extends CloudSimEntity {
 						}
 					}
 				}
-				if (orchestratorsList.size() == 0) {
-					simLog.printSameLine("SimulationManager- Error no orchestrator found", "red");
+				if (selected < 0) {
+					simLog.incrementTasksFailedLackOfRessources(task);
+					task.setFailureReason(Task.Status.FAILED_DUE_TO_DEVICE_MOBILITY);
+					simLog.incrementTasksFailedMobility(task);
+					failedTasksCount++;
 					tasksCount++;
 					return;
 				}
@@ -420,12 +423,9 @@ public class SimulationManager extends CloudSimEntity {
 
 	private boolean sameLocation(DataCenter Dev1, DataCenter Dev2) {
 		int RANGE = simulationParameters.EDGE_DEVICES_RANGE;
-		if ((Dev1.getType() == TYPES.CLOUD && Dev2.getType() != TYPES.EDGE_DATACENTER) 
-				|| (Dev1.getType() != TYPES.EDGE_DATACENTER && Dev2.getType() == TYPES.CLOUD)) {
+		if (Dev1.getType() == TYPES.CLOUD || Dev2.getType() == TYPES.CLOUD) {
 			RANGE = simulationParameters.CLOUD_RANGE;
-		}
-		else if((Dev1.getType() == TYPES.EDGE_DATACENTER && Dev2.getType() != TYPES.CLOUD) 
-				|| (Dev1.getType() != TYPES.CLOUD && Dev2.getType() == TYPES.EDGE_DATACENTER)){
+		} else if (Dev1.getType() == TYPES.EDGE_DATACENTER || Dev2.getType() == TYPES.EDGE_DATACENTER) {
 			RANGE = simulationParameters.EDGE_DATACENTERS_RANGE;
 		}
 		double distance = getdistance(Dev1, Dev2);
@@ -447,7 +447,7 @@ public class SimulationManager extends CloudSimEntity {
 		}else
 		{
 			double p = (h1 + h2 + d)/2;
-			double L = 2*(Math.sqrt(p*(p-h1)*(p-h1)*(p-h2)))/d;
+			double L = 2*(Math.sqrt(p*(p-h1)*(p-h2)*(p-d)))/d;
 			if(L > simulationParameters.MIN_HEIGHT + simulationParameters.EARTH_RADIUS) {
 				return true;
 			}
@@ -492,5 +492,9 @@ public class SimulationManager extends CloudSimEntity {
 
 	public List<Task> getTasksList() {
 		return tasksList;
+	}
+
+	public int getOverflowtime() {
+		return overflowtime;
 	}
 }

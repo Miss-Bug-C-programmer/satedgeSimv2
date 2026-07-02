@@ -16,7 +16,11 @@ public class FileTransferProgress {
 	private double fileSize; // in kbits
 	private double currentBandwidth; // kbits/s
 	private double totalBandwidths=0; // kbits/s
-	private int bwAllocationTimes=0; 
+	private int bwAllocationTimes=0;
+	private double bandwidthShareClamped = 1.0;
+	private double txPowerRatioClamped = 1.0;
+	private boolean nativeNetworkBound = false;
+	private boolean nativeTxPowerBound = false;
 
 	public FileTransferProgress(Task task, double remainingFileSize, Type type) {
 		this.task = task;
@@ -91,6 +95,45 @@ public class FileTransferProgress {
 	
 	public double getAverageBandwidth() {
 		return totalBandwidths/bwAllocationTimes;
+	}
+
+	public double getBandwidthShareClamped() {
+		return bandwidthShareClamped;
+	}
+
+	public void setBandwidthShareClamped(double bandwidthShareClamped) {
+		this.bandwidthShareClamped = clampShare(bandwidthShareClamped);
+	}
+
+	public double getTxPowerRatioClamped() {
+		return txPowerRatioClamped;
+	}
+
+	public void setTxPowerRatioClamped(double txPowerRatioClamped) {
+		this.txPowerRatioClamped = clampShare(txPowerRatioClamped);
+	}
+
+	public boolean isNativeNetworkBound() {
+		return nativeNetworkBound;
+	}
+
+	public void setNativeNetworkBound(boolean nativeNetworkBound) {
+		this.nativeNetworkBound = nativeNetworkBound;
+	}
+
+	public boolean isNativeTxPowerBound() {
+		return nativeTxPowerBound;
+	}
+
+	public void setNativeTxPowerBound(boolean nativeTxPowerBound) {
+		this.nativeTxPowerBound = nativeTxPowerBound;
+	}
+
+	private double clampShare(double value) {
+		if (Double.isNaN(value) || Double.isInfinite(value)) {
+			return 1.0;
+		}
+		return Math.max(0.10, Math.min(1.0, value));
 	}
 
 }

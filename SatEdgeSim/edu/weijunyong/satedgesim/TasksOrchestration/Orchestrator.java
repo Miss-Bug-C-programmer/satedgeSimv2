@@ -339,17 +339,7 @@ public abstract class Orchestrator {
 			assigned = orchestrationHistory.get(vmIndex).size();
 		}
 		int finished = vm.getCloudletScheduler() == null ? 0 : vm.getCloudletScheduler().getCloudletFinishedList().size();
-		int outstanding = Math.max(0, assigned - finished);
-		if (outstanding > 0) {
-			return outstanding;
-		}
-		if (assigned > 0) {
-			return assigned;
-		}
-		if (orchestrationHistory == null || vmIndex < 0 || vmIndex >= orchestrationHistory.size()) {
-			return 0;
-		}
-		return orchestrationHistory.get(vmIndex).size();
+		return Math.max(0, assigned - finished);
 	}
 
 	private static int resolveVmIndex(List<Vm> vmList, Vm vm) {
