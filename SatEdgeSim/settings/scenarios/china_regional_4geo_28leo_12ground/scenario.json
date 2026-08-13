@@ -1,0 +1,244 @@
+{
+  "name": "china_regional_4geo_28leo_12ground",
+  "coordinateFrame": "ECEF",
+  "coordinateUnit": "km",
+  "earthRadiusKm": 6378.137,
+  "geoAltitudeKm": 35786.0,
+  "leoAltitudeKm": 550.0,
+  "leoInclinationDeg": 53.0,
+  "geoCount": 4,
+  "leoCount": 28,
+  "leoPlanes": 4,
+  "leoSatellitesPerPlane": 7,
+  "groundCount": 12,
+  "durationSec": 3600,
+  "stepSec": 1,
+  "geoLongitudesDeg": [
+    80.0,
+    95.0,
+    110.0,
+    125.0
+  ],
+  "geoSatellites": [
+    {
+      "id": "GEO-01",
+      "longitudeDeg": 80.0
+    },
+    {
+      "id": "GEO-02",
+      "longitudeDeg": 95.0
+    },
+    {
+      "id": "GEO-03",
+      "longitudeDeg": 110.0
+    },
+    {
+      "id": "GEO-04",
+      "longitudeDeg": 125.0
+    }
+  ],
+  "groundSites": [
+    {
+      "name": "Beijing",
+      "latDeg": 39.9,
+      "lonDeg": 116.4
+    },
+    {
+      "name": "Shanghai",
+      "latDeg": 31.2,
+      "lonDeg": 121.5
+    },
+    {
+      "name": "Shenzhen",
+      "latDeg": 22.5,
+      "lonDeg": 114.1
+    },
+    {
+      "name": "Chengdu",
+      "latDeg": 30.6,
+      "lonDeg": 104.1
+    },
+    {
+      "name": "Xi'an",
+      "latDeg": 34.3,
+      "lonDeg": 108.9
+    },
+    {
+      "name": "Wuhan",
+      "latDeg": 30.6,
+      "lonDeg": 114.3
+    },
+    {
+      "name": "Zhengzhou",
+      "latDeg": 34.7,
+      "lonDeg": 113.6
+    },
+    {
+      "name": "Kunming",
+      "latDeg": 25.0,
+      "lonDeg": 102.7
+    },
+    {
+      "name": "Urumqi",
+      "latDeg": 43.8,
+      "lonDeg": 87.6
+    },
+    {
+      "name": "Harbin",
+      "latDeg": 45.8,
+      "lonDeg": 126.5
+    },
+    {
+      "name": "Lhasa",
+      "latDeg": 29.7,
+      "lonDeg": 91.1
+    },
+    {
+      "name": "Haikou",
+      "latDeg": 20.0,
+      "lonDeg": 110.3
+    }
+  ],
+  "leoSatellites": [
+    {
+      "id": "LEO-01",
+      "plane": 0,
+      "indexWithinPlane": 0
+    },
+    {
+      "id": "LEO-02",
+      "plane": 0,
+      "indexWithinPlane": 1
+    },
+    {
+      "id": "LEO-03",
+      "plane": 0,
+      "indexWithinPlane": 2
+    },
+    {
+      "id": "LEO-04",
+      "plane": 0,
+      "indexWithinPlane": 3
+    },
+    {
+      "id": "LEO-05",
+      "plane": 0,
+      "indexWithinPlane": 4
+    },
+    {
+      "id": "LEO-06",
+      "plane": 0,
+      "indexWithinPlane": 5
+    },
+    {
+      "id": "LEO-07",
+      "plane": 0,
+      "indexWithinPlane": 6
+    },
+    {
+      "id": "LEO-08",
+      "plane": 1,
+      "indexWithinPlane": 0
+    },
+    {
+      "id": "LEO-09",
+      "plane": 1,
+      "indexWithinPlane": 1
+    },
+    {
+      "id": "LEO-10",
+      "plane": 1,
+      "indexWithinPlane": 2
+    },
+    {
+      "id": "LEO-11",
+      "plane": 1,
+      "indexWithinPlane": 3
+    },
+    {
+      "id": "LEO-12",
+      "plane": 1,
+      "indexWithinPlane": 4
+    },
+    {
+      "id": "LEO-13",
+      "plane": 1,
+      "indexWithinPlane": 5
+    },
+    {
+      "id": "LEO-14",
+      "plane": 1,
+      "indexWithinPlane": 6
+    },
+    {
+      "id": "LEO-15",
+      "plane": 2,
+      "indexWithinPlane": 0
+    },
+    {
+      "id": "LEO-16",
+      "plane": 2,
+      "indexWithinPlane": 1
+    },
+    {
+      "id": "LEO-17",
+      "plane": 2,
+      "indexWithinPlane": 2
+    },
+    {
+      "id": "LEO-18",
+      "plane": 2,
+      "indexWithinPlane": 3
+    },
+    {
+      "id": "LEO-19",
+      "plane": 2,
+      "indexWithinPlane": 4
+    },
+    {
+      "id": "LEO-20",
+      "plane": 2,
+      "indexWithinPlane": 5
+    },
+    {
+      "id": "LEO-21",
+      "plane": 2,
+      "indexWithinPlane": 6
+    },
+    {
+      "id": "LEO-22",
+      "plane": 3,
+      "indexWithinPlane": 0
+    },
+    {
+      "id": "LEO-23",
+      "plane": 3,
+      "indexWithinPlane": 1
+    },
+    {
+      "id": "LEO-24",
+      "plane": 3,
+      "indexWithinPlane": 2
+    },
+    {
+      "id": "LEO-25",
+      "plane": 3,
+      "indexWithinPlane": 3
+    },
+    {
+      "id": "LEO-26",
+      "plane": 3,
+      "indexWithinPlane": 4
+    },
+    {
+      "id": "LEO-27",
+      "plane": 3,
+      "indexWithinPlane": 5
+    },
+    {
+      "id": "LEO-28",
+      "plane": 3,
+      "indexWithinPlane": 6
+    }
+  ]
+}

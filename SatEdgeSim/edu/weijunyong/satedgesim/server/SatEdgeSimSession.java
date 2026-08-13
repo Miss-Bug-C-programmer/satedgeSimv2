@@ -109,6 +109,23 @@ public class SatEdgeSimSession {
             throw new IllegalStateException("SatEdgeSim settings files failed validation");
         }
 
+        int trajectoryCount = simulationParameters.EdgeDeviceslocationinfo == null
+                ? 0 : simulationParameters.EdgeDeviceslocationinfo.size();
+        int requestedDevices = resetRequest.devicesCount == -1
+                ? simulationParameters.MAX_NUM_OF_EDGE_DEVICES : resetRequest.devicesCount;
+        if (requestedDevices < 1) {
+            throw new IllegalArgumentException("devicesCount must satisfy 1 <= devicesCount <= "
+                    + simulationParameters.MAX_NUM_OF_EDGE_DEVICES + ", got " + requestedDevices);
+        }
+        if (requestedDevices > trajectoryCount) {
+            throw new IllegalArgumentException("devicesCount=" + requestedDevices
+                    + " exceeds LEO trajectory block count=" + trajectoryCount);
+        }
+        if (requestedDevices > simulationParameters.MAX_NUM_OF_EDGE_DEVICES) {
+            throw new IllegalArgumentException("devicesCount must satisfy 1 <= devicesCount <= "
+                    + simulationParameters.MAX_NUM_OF_EDGE_DEVICES + ", got " + requestedDevices);
+        }
+
         if (config.forceSequential) {
             simulationParameters.PARALLEL = false;
         }
@@ -149,7 +166,8 @@ public class SatEdgeSimSession {
     }
 
     private void buildSimulation() throws Exception {
-        int devicesCount = resetRequest.devicesCount > 0 ? resetRequest.devicesCount : simulationParameters.MAX_NUM_OF_EDGE_DEVICES;
+        int devicesCount = resetRequest.devicesCount == -1
+                ? simulationParameters.MAX_NUM_OF_EDGE_DEVICES : resetRequest.devicesCount;
         int algorithmIndex = clamp(resetRequest.algorithmIndex, 0, simulationParameters.ORCHESTRATION_AlGORITHMS.length - 1);
         int architectureIndex = clamp(resetRequest.architectureIndex, 0, simulationParameters.ORCHESTRATION_ARCHITECTURES.length - 1);
         Scenario scenario = new Scenario(devicesCount, algorithmIndex, architectureIndex);

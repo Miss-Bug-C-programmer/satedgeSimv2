@@ -52,6 +52,8 @@ public class simulationParameters {
 	//public static int AREA_WIDTH;
 	public static double EARTH_RADIUS;			  //Earth radius(in meters)
 	public static double MIN_HEIGHT;			  //sat min_height(in meters)
+	public static double GROUND_MIN_ELEVATION_DEG = 10.0;
+	public static double ISL_MIN_CLEARANCE_METERS = 100000.0;
 	
 	// Edge devices, server,datacenters..
 	public static int NUM_OF_EDGE_DATACENTERS;    // Number of edge data centers

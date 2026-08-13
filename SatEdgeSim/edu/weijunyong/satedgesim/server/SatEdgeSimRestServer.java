@@ -45,6 +45,8 @@ public class SatEdgeSimRestServer {
                 config.port = Integer.parseInt(args[++i]);
             } else if ("--sim-config".equals(args[i]) && i + 1 < args.length) {
                 config.simConfigFile = args[++i];
+            } else if ("--scenario-dir".equals(args[i]) && i + 1 < args.length) {
+                config.applyScenarioDirectory(args[++i]);
             }
         }
         new SatEdgeSimRestServer(config).start();
@@ -57,6 +59,10 @@ public class SatEdgeSimRestServer {
             protected JsonResponse handleJson(HttpExchange exchange, String body) throws Exception {
                 requireMethod(exchange, "POST");
                 ResetRequest request = body.trim().isEmpty() ? new ResetRequest() : gson.fromJson(body, ResetRequest.class);
+                if (request == null) {
+                    request = new ResetRequest();
+                }
+                config.resolveAndValidateDevicesCount(request.devicesCount);
                 SatEdgeSimSession newSession;
                 synchronized (sessionLock) {
                     if (session != null) {

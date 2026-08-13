@@ -103,6 +103,10 @@ public class FilesParser {
 					.parseDouble(prop.getProperty("Earth_radius").trim());	// meters
 			simulationParameters.MIN_HEIGHT= Double
 					.parseDouble(prop.getProperty("min_height").trim());	// meters
+			simulationParameters.GROUND_MIN_ELEVATION_DEG = Double.parseDouble(
+				prop.getProperty("ground_min_elevation_deg", "10").trim());
+			simulationParameters.ISL_MIN_CLEARANCE_METERS = Double.parseDouble(
+				prop.getProperty("isl_min_clearance_m", "100000").trim());
 			simulationParameters.UPDATE_INTERVAL = Double.parseDouble(prop.getProperty("update_interval").trim()); // seconds
 			simulationParameters.DEEP_LOGGING = Boolean.parseBoolean(prop.getProperty("deep_log_enabled").trim());
 			simulationParameters.SAVE_LOG = Boolean.parseBoolean(prop.getProperty("save_log_file").trim());

@@ -1,0 +1,29 @@
+<?xml version='1.0' encoding='utf-8'?>
+<edge_devices>
+	<device arch="x86" os="linux" vmm="xen">
+		<mobility>true</mobility>
+		<battery>false</battery>
+		<percentage>100</percentage>
+		<batteryCapacity>18.75</batteryCapacity>
+		<idleConsumption>0.078</idleConsumption>
+		<maxConsumption>3.3</maxConsumption>
+		<isOrchestrator>false</isOrchestrator>
+		<generateTasks>true</generateTasks>
+		<hosts>
+			<host>
+				<core>8</core>
+				<mips>47000</mips>
+				<ram>4000</ram>
+				<storage>128000</storage>
+				<VMs>
+					<VM vmm="xen">
+						<core>8</core>
+						<mips>47000</mips>
+						<ram>4000</ram>
+						<storage>128000</storage>
+					</VM>
+				</VMs>
+			</host>
+		</hosts>
+	</device>
+</edge_devices>

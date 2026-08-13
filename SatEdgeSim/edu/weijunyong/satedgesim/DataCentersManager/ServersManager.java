@@ -3,11 +3,10 @@ package edu.weijunyong.satedgesim.DataCentersManager;
 import java.io.File;
 import java.lang.reflect.Constructor;
 import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.Iterator;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.Random;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -102,20 +101,24 @@ public class ServersManager {
 		//从最大数目边缘设备中抽取当前场景边缘设备数量，号码随机乱序不重复
 		int edgeDevicesNum = simulationParameters.MAX_NUM_OF_EDGE_DEVICES;
 		int getDevicesCount = getSimulationManager().getScenario().getDevicesCount();
-	    Set<Integer> set=new HashSet<Integer>();
-		while(true){
-			set.add((int)(Math.random()*edgeDevicesNum+1));
-			if(set.size()== getDevicesCount)
-				break;
+		if (getDevicesCount < 1 || getDevicesCount > edgeDevicesNum) {
+			throw new IllegalArgumentException("devicesCount must be between 1 and " + edgeDevicesNum
+					+ ", got " + getDevicesCount);
 		}
-		//System.out.println(set);
-		int[] EDGEID = new int[set.size()];
-		Iterator<Integer> it = set.iterator();
-		int count = 0;
-        while(it.hasNext()){
-            int s = it.next();
-            EDGEID[count] = s;
-			count++;
+		List<Integer> selectedIds = new ArrayList<Integer>();
+		for (int id = 1; id <= edgeDevicesNum; id++) {
+			selectedIds.add(id);
+		}
+		if (getDevicesCount < edgeDevicesNum) {
+			if (simulationParameters.SERVER_MODE) {
+				Collections.shuffle(selectedIds, new Random(simulationParameters.RL_SERVER_SEED));
+			} else {
+				Collections.shuffle(selectedIds, new Random());
+			}
+		}
+		int[] EDGEID = new int[getDevicesCount];
+		for (int count = 0; count < getDevicesCount; count++) {
+			EDGEID[count] = selectedIds.get(count);
 		}
         //EDGEID数组保存当前场景边缘设备的ID号码
         int edgeID = 0, index=0;
@@ -375,7 +378,9 @@ public class ServersManager {
 	 		zpos = Double.parseDouble(i3)*1000;
 	 		//System.out.println("The location is: "+xpos + "," + ypos + "," + zpos);
 	 		double Geohigh = Math.abs(Math.sqrt(Math.pow(xpos, 2)+ Math.pow(ypos, 2)+ Math.pow(zpos, 2)));
-	 	    if(simulationParameters.EARTH_RADIUS > Geohigh) {
+			// CSV coordinates are rounded decimal kilometres; allow tiny numerical
+			// noise at the physical Earth-radius boundary.
+			if(simulationParameters.EARTH_RADIUS - Geohigh > 1.0e-3) {
 	 	    	SimLog.println("ServersManager- locationinfo Id:"+ id + " Incorrect data. Time is: " +timeindex +", check the '.csv' file.");
 				simulationParameters.abort("SatEdgeSim requested termination"); 
 	 	    }
