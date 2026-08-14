@@ -45,9 +45,93 @@ public class RlDecisionBridge {
     private double totalServerProcessingMs = 0.0;
     private double maxServerProcessingMs = 0.0;
     private final Map<String, Long> fallbackReasonCounts = new LinkedHashMap<String, Long>();
+    private long fullStateBuilderInvocations = 0L;
+    private long candidateEvaluations = 0L;
+    private PersistentExecutionConfiguration persistentConfiguration;
+    private long persistentDispatchCount = 0L;
+    private Map<String, Object> lastPersistentDispatch = new LinkedHashMap<String, Object>();
+    private Task currentTask;
+    private String[] currentArchitecture;
+    private List<List<Integer>> currentOrchestrationHistory;
+    private FeasibilityChecker currentChecker;
+    private long scopedPlannerBuildInvocations = 0L;
+    private long scopedPlannerCandidateEvaluations = 0L;
 
     public RlDecisionBridge(String sessionId) {
         this.sessionId = sessionId;
+    }
+
+    public void setPersistentConfiguration(PersistentExecutionConfiguration configuration) {
+        synchronized (lock) {
+            this.persistentConfiguration = configuration;
+            lock.notifyAll();
+        }
+    }
+
+    /** Resolve a reusable rule before requesting a new RL decision. */
+    public int resolvePersistentVm(
+            SimulationManager simulationManager,
+            String[] architecture,
+            Task task,
+            List<Vm> vmList,
+            FeasibilityChecker checker) {
+        synchronized (lock) {
+            if (persistentConfiguration == null || task == null || vmList == null) {
+                return -1;
+            }
+            Map<String, Object> taskContext = new LinkedHashMap<String, Object>();
+            taskContext.put("taskId", task.getId());
+            taskContext.put("applicationId", task.getApplicationID());
+            if (task.getEdgeDevice() != null) {
+                taskContext.put("sourceId", task.getEdgeDevice().getDeviceID());
+                taskContext.put("sourceType", String.valueOf(task.getEdgeDevice().getType()));
+            }
+            Object materialized = persistentConfiguration.materialize(taskContext);
+            if (!(materialized instanceof Map)) {
+                return -1;
+            }
+            Map<?, ?> rule = (Map<?, ?>) materialized;
+            int selected = number(rule.get("targetVmIndex"), number(rule.get("vmIndex"), -1));
+            long selectedVmId = numberLong(rule.get("selectedVmId"), numberLong(rule.get("targetVmId"), numberLong(rule.get("vmId"), -1L)));
+            if (selected < 0 && selectedVmId >= 0) {
+                for (int i = 0; i < vmList.size(); i++) {
+                    if (vmList.get(i).getId() == selectedVmId) {
+                        selected = i;
+                        break;
+                    }
+                }
+            }
+            if (selected < 0) {
+                String tier = rule.get("logicalTier") == null ? null : String.valueOf(rule.get("logicalTier"));
+                int abstractAction = number(rule.get("abstractAction"), -1);
+                for (int i = 0; i < vmList.size(); i++) {
+                    if (!checker.isFeasible(architecture, task, vmList.get(i))) continue;
+                    Orchestrator.FeasibilityInfo info = Orchestrator.evaluateOffloading(
+                            simulationManager, task, vmList.get(i), new String[0], null, i);
+                    if ((abstractAction >= 0 && info.abstractAction == abstractAction)
+                            || (tier != null && tier.equalsIgnoreCase(info.logicalTier))) {
+                        selected = i;
+                        break;
+                    }
+                }
+            }
+            if (selected < 0 || selected >= vmList.size() || !checker.isFeasible(architecture, task, vmList.get(selected))) {
+                lastPersistentDispatch = new LinkedHashMap<String, Object>();
+                lastPersistentDispatch.put("accepted", false);
+                lastPersistentDispatch.put("reason", "persistent_rule_target_unavailable");
+                return -1;
+            }
+            persistentDispatchCount += 1L;
+            lastPersistentDispatch = new LinkedHashMap<String, Object>();
+            lastPersistentDispatch.put("accepted", true);
+            lastPersistentDispatch.put("configId", persistentConfiguration.configId);
+            lastPersistentDispatch.put("configVersion", persistentConfiguration.version);
+            lastPersistentDispatch.put("taskId", task.getId());
+            lastPersistentDispatch.put("selectedVmIndex", selected);
+            lastPersistentDispatch.put("selectedVmId", vmList.get(selected).getId());
+            lastPersistentDispatch.put("dispatchSource", "persistent_execution_rule");
+            return selected;
+        }
     }
 
     public int requestDecision(
@@ -72,6 +156,10 @@ public class RlDecisionBridge {
             if (closed) {
                 return fallbackVm(architecture, task, vmList, checker);
             }
+            currentTask = task;
+            currentArchitecture = architecture;
+            currentOrchestrationHistory = orchestrationHistory;
+            currentChecker = checker;
             currentState = RlStateBuilder.build(
                     sessionId,
                     "WAITING_FOR_ACTION",
@@ -84,6 +172,8 @@ public class RlDecisionBridge {
                     checker,
                     metrics,
                     "waiting for /apply_action");
+            fullStateBuilderInvocations += 1L;
+            candidateEvaluations += vmList == null ? 0L : vmList.size();
             currentVmList = vmList;
             currentSimulationManager = simulationManager;
             pendingAction = null;
@@ -143,6 +233,10 @@ public class RlDecisionBridge {
             pendingResolution = null;
             currentVmList = null;
             currentSimulationManager = null;
+            currentTask = null;
+            currentArchitecture = null;
+            currentOrchestrationHistory = null;
+            currentChecker = null;
             lock.notifyAll();
             return selected;
         }
@@ -282,6 +376,119 @@ public class RlDecisionBridge {
     public RlState getCurrentStateSnapshot() {
         synchronized (lock) {
             return currentState;
+        }
+    }
+
+    /**
+     * Scalar-only snapshot for the cheap monitor.  It intentionally does not
+     * expose or traverse candidateVms/datacenters.
+     */
+    public Map<String, Object> getCurrentDecisionScalars() {
+        synchronized (lock) {
+            Map<String, Object> out = new LinkedHashMap<String, Object>();
+            out.put("status", currentState == null ? (finished ? "FINISHED" : (closed ? "CLOSED" : "RUNNING")) : currentState.status);
+            out.put("decisionId", currentState == null ? -1L : currentState.decisionId);
+            out.put("taskId", currentState == null ? -1L : currentState.taskId);
+            out.put("sourceDeviceId", currentState == null ? -1 : currentState.sourceDeviceId);
+            out.put("simulationTimeSec", currentState == null ? 0.0 : currentState.simulationTime);
+            return out;
+        }
+    }
+
+    public Map<String, Object> getDecisionPlaneStats() {
+        synchronized (lock) {
+            Map<String, Object> out = new LinkedHashMap<String, Object>();
+            out.put("fullStateBuilderInvocations", fullStateBuilderInvocations);
+            out.put("candidateEvaluations", candidateEvaluations);
+            out.put("scopedPlannerBuildInvocations", scopedPlannerBuildInvocations);
+            out.put("scopedPlannerCandidateEvaluations", scopedPlannerCandidateEvaluations);
+            out.put("cheapMonitorFullStateBuilderInvoked", false);
+            out.put("cheapMonitorCandidateEvaluations", 0L);
+            out.put("containsFutureStochasticState", false);
+            out.put("lastDecisionId", currentState == null ? -1L : currentState.decisionId);
+            out.put("lastTaskId", currentState == null ? -1L : currentState.taskId);
+            out.put("persistentDispatchCount", persistentDispatchCount);
+            out.put("lastPersistentDispatch", new LinkedHashMap<String, Object>(lastPersistentDispatch));
+            return out;
+        }
+    }
+
+    /** Acquire a planner projection before serialising the REST response. */
+    public RlState buildScopedPlannerState(Map<String, Object> scope, int maxCandidates) {
+        synchronized (lock) {
+            if (currentState == null || currentTask == null || currentVmList == null || currentSimulationManager == null) {
+                return getState();
+            }
+            List<Vm> selected = new ArrayList<Vm>();
+            List<Integer> originalIndices = new ArrayList<Integer>();
+            int limit = maxCandidates < 0 ? Integer.MAX_VALUE : maxCandidates;
+            for (int i = 0; i < currentVmList.size() && selected.size() < limit; i++) {
+                Vm vm = currentVmList.get(i);
+                if (!scopeMatches(scope, currentTask, vm)) continue;
+                selected.add(vm);
+                originalIndices.add(i);
+            }
+            RlState scoped = RlStateBuilder.buildScoped(
+                    sessionId,
+                    "WAITING_FOR_ACTION",
+                    currentState.decisionId,
+                    currentSimulationManager,
+                    currentArchitecture,
+                    currentTask,
+                    selected,
+                    currentOrchestrationHistory,
+                    currentChecker,
+                    metrics,
+                    "scoped planner acquisition");
+            for (int i = 0; i < scoped.candidateVms.size() && i < originalIndices.size(); i++) {
+                scoped.candidateVms.get(i).vmIndex = originalIndices.get(i);
+            }
+            scopedPlannerBuildInvocations += 1L;
+            scopedPlannerCandidateEvaluations += selected.size();
+            return scoped;
+        }
+    }
+
+    private static boolean scopeMatches(Map<String, Object> scope, Task task, Vm vm) {
+        if (scope == null || scope.isEmpty()) return true;
+        if (has(scope, "task_ids", "taskIds")) {
+            if (contains(scope, "task_ids", "taskIds", task.getId())) return true;
+            return false;
+        }
+        if (has(scope, "source_ids", "sourceIds")) {
+            int sourceId = task.getEdgeDevice() == null ? -1 : task.getEdgeDevice().getDeviceID();
+            if (contains(scope, "source_ids", "sourceIds", sourceId)) return true;
+            return false;
+        }
+        if (has(scope, "node_ids", "nodeIds") || has(scope, "resource_keys", "resourceKeys")) {
+            long vmId = vm.getId();
+            long deviceId = -1L;
+            if (vm.getHost() != null && vm.getHost().getDatacenter() instanceof DataCenter) {
+                deviceId = ((DataCenter) vm.getHost().getDatacenter()).getDeviceID();
+            }
+            return contains(scope, "node_ids", "nodeIds", vmId)
+                    || contains(scope, "node_ids", "nodeIds", deviceId)
+                    || contains(scope, "resource_keys", "resourceKeys", vmId);
+        }
+        return false;
+    }
+
+    private static boolean has(Map<String, Object> map, String first, String second) {
+        return map.containsKey(first) || map.containsKey(second);
+    }
+
+    private static boolean contains(Map<String, Object> map, String first, String second, Object value) {
+        Object raw = map.containsKey(first) ? map.get(first) : map.get(second);
+        if (!(raw instanceof List)) return false;
+        for (Object item : (List<?>) raw) {
+            if (String.valueOf(item).equals(String.valueOf(value))) return true;
+        }
+        return false;
+    }
+
+    public int getCurrentCandidateCount() {
+        synchronized (lock) {
+            return currentVmList == null ? 0 : currentVmList.size();
         }
     }
 
@@ -508,6 +715,14 @@ public class RlDecisionBridge {
             }
         }
         return -1;
+    }
+
+    private static int number(Object value, int fallback) {
+        return value instanceof Number ? ((Number) value).intValue() : fallback;
+    }
+
+    private static long numberLong(Object value, long fallback) {
+        return value instanceof Number ? ((Number) value).longValue() : fallback;
     }
 
     public interface FeasibilityChecker {

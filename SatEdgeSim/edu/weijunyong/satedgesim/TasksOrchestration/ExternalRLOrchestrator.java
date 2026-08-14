@@ -25,6 +25,20 @@ public class ExternalRLOrchestrator extends Orchestrator {
         if (bridge == null || bridge.isClosed()) {
             return firstFeasibleVm(architecture, task);
         }
+        int persistentVm = bridge.resolvePersistentVm(
+                simulationManager,
+                architecture,
+                task,
+                vmList,
+                new RlDecisionBridge.FeasibilityChecker() {
+                    @Override
+                    public boolean isFeasible(String[] arch, Task t, Vm vm) {
+                        return ExternalRLOrchestrator.this.offloadingIsPossible(t, vm, arch);
+                    }
+                });
+        if (persistentVm >= 0) {
+            return persistentVm;
+        }
         return bridge.requestDecision(
                 simulationManager,
                 architecture,

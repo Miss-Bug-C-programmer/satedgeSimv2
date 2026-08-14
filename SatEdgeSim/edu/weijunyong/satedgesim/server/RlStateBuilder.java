@@ -32,6 +32,40 @@ public final class RlStateBuilder {
             RlDecisionBridge.FeasibilityChecker checker,
             Map<String, Object> metrics,
             String message) {
+        return buildInternal(sessionId, status, decisionId, simulationManager, architecture, task, vmList,
+                orchestrationHistory, checker, metrics, message, false);
+    }
+
+    /** Build only the selected candidate/resource projection for a planner call. */
+    public static RlState buildScoped(
+            String sessionId,
+            String status,
+            long decisionId,
+            SimulationManager simulationManager,
+            String[] architecture,
+            Task task,
+            List<Vm> vmList,
+            List<List<Integer>> orchestrationHistory,
+            RlDecisionBridge.FeasibilityChecker checker,
+            Map<String, Object> metrics,
+            String message) {
+        return buildInternal(sessionId, status, decisionId, simulationManager, architecture, task, vmList,
+                orchestrationHistory, checker, metrics, message, true);
+    }
+
+    private static RlState buildInternal(
+            String sessionId,
+            String status,
+            long decisionId,
+            SimulationManager simulationManager,
+            String[] architecture,
+            Task task,
+            List<Vm> vmList,
+            List<List<Integer>> orchestrationHistory,
+            RlDecisionBridge.FeasibilityChecker checker,
+            Map<String, Object> metrics,
+            String message,
+            boolean scoped) {
         RlState state = new RlState();
         state.sessionId = sessionId;
         state.status = status;
@@ -108,21 +142,25 @@ public final class RlStateBuilder {
             state.abstractActionMaskMobilitySafe.add(abstractMaskMobilitySafe[i]);
             state.abstractActionMaskCompletionSafe.add(abstractMaskCompletionSafe[i]);
         }
-        state.denseCoverageMode = "source_projection";
+        state.denseCoverageMode = scoped ? "scoped_candidate_projection" : "source_projection";
         state.viableCandidateCount = viableCandidateCount;
         state.inviableCandidateCount = inviableCandidateCount;
         state.uncertainCandidateCount = uncertainCandidateCount;
         state.viabilitySummarySource = viabilitySummarySource == null ? "unavailable" : viabilitySummarySource;
-        state.denseSourceSummaries = buildDenseSourceSummaries(
-                simulationManager,
-                architecture,
-                task,
-                vmList,
-                orchestrationHistory);
+        if (!scoped) {
+            state.denseSourceSummaries = buildDenseSourceSummaries(
+                    simulationManager,
+                    architecture,
+                    task,
+                    vmList,
+                    orchestrationHistory);
+        }
 
-        List<? extends DataCenter> dcs = simulationManager.getServersManager().getDatacenterList();
-        for (DataCenter dc : dcs) {
-            state.datacenters.add(buildDataCenter(dc));
+        if (!scoped) {
+            List<? extends DataCenter> dcs = simulationManager.getServersManager().getDatacenterList();
+            for (DataCenter dc : dcs) {
+                state.datacenters.add(buildDataCenter(dc));
+            }
         }
         return state;
     }

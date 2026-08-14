@@ -155,6 +155,36 @@ public class SatEdgeSimRestServer {
                 return ok(session.getHealthPayload());
             }
         });
+        server.createContext("/capabilities", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                return ok(ControlPhysicalContract.capabilities(
+                        session != null,
+                        session == null ? new LinkedHashMap<String, Object>() : session.getDecisionPlaneStats()));
+            }
+        });
+        server.createContext("/get_monitor_state", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getMonitorState());
+            }
+        });
+        server.createContext("/get_planner_state", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                ensureSession();
+                if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                    return ok(session.getPlannerState(new LinkedHashMap<String, Object>(), true));
+                }
+                requireMethod(exchange, "POST");
+                Map<String, Object> request = body.trim().isEmpty()
+                        ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                return ok(session.getPlannerState(request, false));
+            }
+        });
         server.createContext("/debug/current_decision", new JsonHandler() {
             @Override
             protected JsonResponse handleJson(HttpExchange exchange, String body) {
@@ -177,6 +207,14 @@ public class SatEdgeSimRestServer {
                 requireMethod(exchange, "GET");
                 ensureSession();
                 return ok(session.getReceiptStats());
+            }
+        });
+        server.createContext("/debug/decision_plane_stats", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getDecisionPlaneStats());
             }
         });
         server.createContext("/topology/current", new JsonHandler() {
@@ -210,6 +248,58 @@ public class SatEdgeSimRestServer {
                 requireMethod(exchange, "GET");
                 ensureSession();
                 return ok(session.getConfigurationViability());
+            }
+        });
+        server.createContext("/configuration/current", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getCurrentConfiguration());
+            }
+        });
+        server.createContext("/configuration/validate", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                Map<String, Object> request = body.trim().isEmpty()
+                        ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                return ok(session.validateConfiguration(request));
+            }
+        });
+        server.createContext("/configuration/apply", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                Map<String, Object> request = body.trim().isEmpty()
+                        ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                return ok(session.applyConfiguration(request));
+            }
+        });
+        server.createContext("/configuration/dispatch", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                Map<String, Object> request = body.trim().isEmpty()
+                        ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                return ok(session.dispatchUnderConfiguration(request));
+            }
+        });
+        server.createContext("/advance_world", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                Map<String, Object> request = body.trim().isEmpty()
+                        ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                Object raw = request.get("deltaSec");
+                if (!(raw instanceof Number)) {
+                    throw new IllegalArgumentException("advance_world requires numeric deltaSec");
+                }
+                return ok(session.advanceWorld(((Number) raw).doubleValue()));
             }
         });
         int threads = Math.max(8, Runtime.getRuntime().availableProcessors() * 2);

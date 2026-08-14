@@ -3,9 +3,12 @@ package edu.weijunyong.satedgesim.server;
 import java.lang.reflect.Constructor;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import org.cloudbus.cloudsim.core.CloudSim;
@@ -50,6 +53,8 @@ public class SatEdgeSimSession {
     private SimulationManager simulationManager;
     private SimLog simLog;
     private volatile Throwable failure;
+    private PersistentExecutionConfiguration currentConfiguration;
+    private long configurationReceiptSequence = 0L;
 
     private Class<? extends Mobility> mobilityManager = DefaultMobilityModel.class;
     private Class<? extends DataCenter> edgeDatacenter = DefaultDataCenter.class;
@@ -283,6 +288,9 @@ public class SatEdgeSimSession {
 
     public ExecutionReceipt applyAction(RlAction action) {
         long t0 = System.nanoTime();
+        if (simulation != null && simulation.isPaused()) {
+            simulation.resume();
+        }
         ExecutionReceipt receipt = bridge.submitAction(action);
         double elapsedMs = (System.nanoTime() - t0) / 1_000_000.0;
         receipt.serverProcessingMs = elapsedMs;
@@ -457,6 +465,368 @@ public class SatEdgeSimSession {
         return response;
     }
 
+    private static long numberAsLong(Object value, long fallback) {
+        return value instanceof Number ? ((Number) value).longValue() : fallback;
+    }
+
+    private static int numberAsInt(Object value, int fallback) {
+        return value instanceof Number ? ((Number) value).intValue() : fallback;
+    }
+
+    private static int budgetLimit(Map<String, Object> budget) {
+        if (budget == null) {
+            return -1;
+        }
+        for (String key : new String[] {"max_candidate_count", "maxCandidateCount", "candidateCount"}) {
+            Object value = budget.get(key);
+            if (value instanceof Number) {
+                return Math.max(0, ((Number) value).intValue());
+            }
+        }
+        return -1;
+    }
+
+    private static boolean scopeMatches(Map<String, Object> scope, RlState state, RlState.VmView vm) {
+        if (scope == null || scope.isEmpty()) {
+            return true;
+        }
+        if (contains(scope, "task_ids", "taskIds") && containsValue(scope, "task_ids", "taskIds", state.taskId)) {
+            return true;
+        }
+        if (contains(scope, "source_ids", "sourceIds") && containsValue(scope, "source_ids", "sourceIds", state.sourceDeviceId)) {
+            return true;
+        }
+        if (contains(scope, "node_ids", "nodeIds")) {
+            if (containsValue(scope, "node_ids", "nodeIds", vm.datacenterDeviceId)
+                    || containsValue(scope, "node_ids", "nodeIds", vm.vmId)
+                    || containsValue(scope, "node_ids", "nodeIds", vm.datacenterId)) {
+                return true;
+            }
+        }
+        if (contains(scope, "resource_keys", "resourceKeys")
+                && (containsValue(scope, "resource_keys", "resourceKeys", vm.vmId)
+                        || containsValue(scope, "resource_keys", "resourceKeys", vm.id))) {
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean contains(Map<String, Object> scope, String first, String second) {
+        return scope.containsKey(first) || scope.containsKey(second);
+    }
+
+    private static boolean containsValue(Map<String, Object> scope, String first, String second, Object value) {
+        Object raw = scope.containsKey(first) ? scope.get(first) : scope.get(second);
+        if (!(raw instanceof List)) {
+            return false;
+        }
+        for (Object item : (List<?>) raw) {
+            if (String.valueOf(item).equals(String.valueOf(value))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Map<String, Object> vmMap(RlState.VmView vm) {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("id", vm.id);
+        result.put("vmIndex", vm.vmIndex);
+        result.put("vmId", vm.vmId);
+        result.put("hostId", vm.hostId);
+        result.put("mips", vm.mips);
+        result.put("pesNumber", vm.pesNumber);
+        result.put("ram", vm.ram);
+        result.put("bw", vm.bw);
+        result.put("size", vm.size);
+        result.put("datacenterId", vm.datacenterId);
+        result.put("datacenterDeviceId", vm.datacenterDeviceId);
+        result.put("datacenterType", vm.datacenterType);
+        result.put("logicalTier", vm.logicalTier);
+        result.put("abstractAction", vm.abstractAction);
+        result.put("abstractActionName", vm.abstractActionName);
+        result.put("isLocalToSource", vm.isLocalToSource);
+        result.put("isRemoteToSource", vm.isRemoteToSource);
+        result.put("linkAvailable", vm.linkAvailable);
+        result.put("linkAvailableNow", vm.linkAvailableNow);
+        result.put("estimatedLinkLifetimeSec", vm.estimatedLinkLifetimeSec);
+        result.put("estimatedTotalDelaySec", vm.estimatedTotalDelaySec);
+        result.put("estimatedTaskCompletionTimeSec", vm.estimatedTaskCompletionTimeSec);
+        result.put("estimatedQueueLength", vm.estimatedQueueLength);
+        result.put("estimatedTransmissionRateMbps", vm.estimatedTransmissionRateMbps);
+        result.put("estimatedComputeCapacity", vm.estimatedComputeCapacity);
+        result.put("propagationDelaySec", vm.propagationDelaySec);
+        result.put("linkSurvivalMarginSec", vm.linkSurvivalMarginSec);
+        result.put("linkSurvivalMarginToCompletionSec", vm.linkSurvivalMarginToCompletionSec);
+        result.put("handoverRequired", vm.handoverRequired);
+        result.put("handoverAvailable", vm.handoverAvailable);
+        result.put("mobilityRisk", vm.mobilityRisk);
+        result.put("viabilityStatus", vm.viabilityStatus);
+        result.put("viabilityReason", vm.viabilityReason);
+        result.put("viabilitySource", vm.viabilitySource);
+        result.put("viabilityEvaluated", vm.viabilityEvaluated);
+        result.put("isFeasible", vm.isFeasible);
+        result.put("feasible", vm.feasible);
+        result.put("infeasibleReason", vm.infeasibleReason);
+        return result;
+    }
+
+    public synchronized Map<String, Object> getCurrentConfiguration() {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("active", currentConfiguration != null);
+        result.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        result.put("configId", currentConfiguration == null ? null : currentConfiguration.configId);
+        result.put("version", currentConfiguration == null ? 0L : currentConfiguration.version);
+        result.put("configuration", currentConfiguration == null ? null : currentConfiguration.toMap());
+        result.put("containsFutureStochasticState", false);
+        return result;
+    }
+
+    public synchronized Map<String, Object> validateConfiguration(Map<String, Object> request) {
+        PersistentExecutionConfiguration candidate = PersistentExecutionConfiguration.fromRequest(request);
+        Map<String, Object> receipt = new LinkedHashMap<String, Object>();
+        receipt.put("receiptType", "configuration_validation");
+        receipt.put("contractVersion", ControlPhysicalContract.VERSION);
+        receipt.put("configId", candidate.configId);
+        receipt.put("version", candidate.version);
+        receipt.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        receipt.put("containsFutureStochasticState", false);
+        List<String> reasons = new ArrayList<String>();
+        if (candidate.configId == null || candidate.configId.trim().isEmpty()) {
+            reasons.add("missing_config_id");
+        }
+        if (candidate.version < 0L) {
+            reasons.add("invalid_version");
+        }
+        if (currentConfiguration != null) {
+            boolean exactVersion = candidate.version == currentConfiguration.version;
+            boolean exactConfiguration = exactVersion
+                    && currentConfiguration.configId.equals(candidate.configId)
+                    && currentConfiguration.toMap().equals(candidate.toMap());
+            if (candidate.version < currentConfiguration.version || (exactVersion && !exactConfiguration)) {
+                reasons.add("stale_configuration_version");
+            }
+        }
+        if (candidate.assignments.isEmpty() && candidate.reusableRules.isEmpty()) {
+            reasons.add("no_persistent_execution_rule");
+        }
+        validateBindings(candidate.assignments, reasons);
+        validateBindings(candidate.reusableRules, reasons);
+        receipt.put("accepted", reasons.isEmpty());
+        receipt.put("reasons", reasons);
+        receipt.put("validationSource", "satedgesim_physical_backend");
+        receipt.put("targetAvailabilityChecked", simulationManager != null && simulationManager.getServersManager() != null);
+        return receipt;
+    }
+
+    /** Advance CloudSim through its public pause-at/resume mechanism. */
+    public synchronized Map<String, Object> advanceWorld(double deltaSec) {
+        if (simulation == null) throw new IllegalStateException("simulation is not ready");
+        if (Double.isNaN(deltaSec) || Double.isInfinite(deltaSec) || deltaSec <= 0.0) {
+            throw new IllegalArgumentException("deltaSec must be finite and positive");
+        }
+        Map<String, Object> scalars = bridge.getCurrentDecisionScalars();
+        if (numberAsLong(scalars.get("taskId"), -1L) >= 0L) {
+            Map<String, Object> rejected = new LinkedHashMap<String, Object>();
+            rejected.put("accepted", false);
+            rejected.put("reason", "simulation_waiting_for_decision");
+            rejected.put("simulationTimeSec", simulation.clock());
+            rejected.put("requestedDeltaSec", deltaSec);
+            rejected.put("physicalClockAdvanced", false);
+            rejected.put("directClockMutation", false);
+            return rejected;
+        }
+        double before = simulation.clock();
+        double target = before + deltaSec;
+        boolean scheduled = simulation.pause(target);
+        long deadline = System.currentTimeMillis() + 30000L;
+        while (scheduled && !simulation.isPaused() && !bridge.isFinished() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(10L);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        double after = simulation.clock();
+        List<Long> uncoveredTaskIds = new ArrayList<Long>();
+        if (simulationManager != null && simulationManager.getTasksList() != null) {
+            for (Task task : simulationManager.getTasksList()) {
+                if (task != null && task.getTime() > before && task.getTime() <= after) {
+                    uncoveredTaskIds.add(task.getId());
+                }
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("accepted", scheduled && after > before);
+        result.put("status", simulation.isPaused() ? "ADVANCED_AND_RESUMED" : "ADVANCE_TIMEOUT");
+        result.put("requestedDeltaSec", deltaSec);
+        result.put("simulationTimeBeforeSec", before);
+        result.put("simulationTimeSec", after);
+        result.put("targetSimulationTimeSec", target);
+        result.put("physicalClockAdvanced", after > before);
+        result.put("physicalStateChanged", after > before);
+        result.put("directClockMutation", false);
+        result.put("advanceMechanism", "CloudSim.pauseAt");
+        result.put("resumeAfterReceipt", simulation.isPaused());
+        result.put("oldConfigurationActiveDuringDelay", currentConfiguration == null ? null : currentConfiguration.configId);
+        result.put("newConfigurationAppliedAfterDelay", false);
+        result.put("uncoveredTaskCountDuringDelta", uncoveredTaskIds.size());
+        result.put("uncoveredTaskIdsDuringDelta", uncoveredTaskIds);
+        result.put("containsFutureStochasticState", false);
+        result.put("validationRequiredBeforeConfigurationActivation", true);
+        if (simulation.isPaused()) {
+            simulation.resume();
+        }
+        return result;
+    }
+
+    public synchronized Map<String, Object> applyConfiguration(Map<String, Object> request) {
+        PersistentExecutionConfiguration candidate = PersistentExecutionConfiguration.fromRequest(request);
+        Map<String, Object> validation = validateConfiguration(request);
+        if (!Boolean.TRUE.equals(validation.get("accepted"))) {
+            return validation;
+        }
+        Map<String, Object> receipt = new LinkedHashMap<String, Object>();
+        boolean idempotent = currentConfiguration != null
+                && currentConfiguration.configId.equals(candidate.configId)
+                && currentConfiguration.version == candidate.version
+                && currentConfiguration.toMap().equals(candidate.toMap());
+        Map<String, Object> before = currentConfiguration == null ? new LinkedHashMap<String, Object>() : currentConfiguration.toMap();
+        currentConfiguration = candidate;
+        bridge.setPersistentConfiguration(candidate);
+        configurationReceiptSequence += 1L;
+        receipt.put("receiptType", "configuration_apply");
+        receipt.put("accepted", true);
+        receipt.put("idempotent", idempotent);
+        receipt.put("receiptId", configurationReceiptSequence);
+        receipt.put("configId", candidate.configId);
+        receipt.put("version", candidate.version);
+        receipt.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        receipt.put("changed", !idempotent);
+        receipt.put("previousConfiguration", before);
+        receipt.put("configuration", candidate.toMap());
+        receipt.put("reusableRuleCount", candidate.reusableRules.size());
+        receipt.put("dispatchMode", "persistent_reusable_rule");
+        receipt.put("containsFutureStochasticState", false);
+        return receipt;
+    }
+
+    public synchronized Map<String, Object> dispatchUnderConfiguration(Map<String, Object> request) {
+        PersistentExecutionConfiguration candidate = PersistentExecutionConfiguration.fromRequest(request);
+        Map<String, Object> receipt = new LinkedHashMap<String, Object>();
+        receipt.put("receiptType", "configuration_dispatch");
+        receipt.put("configId", candidate.configId);
+        receipt.put("version", candidate.version);
+        receipt.put("containsFutureStochasticState", false);
+        if (currentConfiguration == null || !currentConfiguration.configId.equals(candidate.configId)
+                || currentConfiguration.version != candidate.version) {
+            receipt.put("accepted", false);
+            receipt.put("reason", "configuration_not_active");
+            return receipt;
+        }
+        Map<String, Object> taskContext = request == null || !(request.get("task") instanceof Map)
+                ? new LinkedHashMap<String, Object>()
+                : new LinkedHashMap<String, Object>((Map<String, Object>) request.get("task"));
+        Map<String, Object> scalars = bridge.getCurrentDecisionScalars();
+        if (!taskContext.containsKey("taskId")) taskContext.put("taskId", scalars.get("taskId"));
+        Object rule = currentConfiguration.materialize(taskContext);
+        receipt.put("task", taskContext);
+        receipt.put("resolvedRule", rule);
+        if (!(rule instanceof Map)) {
+            receipt.put("accepted", false);
+            receipt.put("reason", "no_matching_reusable_rule");
+            return receipt;
+        }
+        if (numberAsLong(scalars.get("taskId"), -1L) < 0L) {
+            receipt.put("accepted", false);
+            receipt.put("reason", "no_pending_decision");
+            return receipt;
+        }
+        RlAction action = actionFromRule((Map<?, ?>) rule, scalars);
+        if (simulation != null && simulation.isPaused()) {
+            simulation.resume();
+        }
+        ExecutionReceipt execution = bridge.submitAction(action);
+        bridge.recordDeliveredReceipt(execution);
+        receipt.put("accepted", execution.accepted);
+        receipt.put("reason", execution.accepted ? "persistent_rule_dispatched" : execution.fallbackReason);
+        receipt.put("dispatchSource", "persistent_execution_rule");
+        receipt.put("executionReceipt", execution.toMap());
+        return receipt;
+    }
+
+    private void validateBindings(Map<String, Object> bindings, List<String> reasons) {
+        if (bindings == null) return;
+        for (Object raw : bindings.values()) {
+            Object candidate = raw;
+            if (raw instanceof Map) {
+                Map<?, ?> map = (Map<?, ?>) raw;
+                if (map.containsKey("assignment")) candidate = map.get("assignment");
+                else if (map.containsKey("action")) candidate = map.get("action");
+                validateResourceFields(map, reasons);
+            }
+            if (candidate instanceof Map) validateResourceFields((Map<?, ?>) candidate, reasons);
+        }
+    }
+
+    private void validateResourceFields(Map<?, ?> binding, List<String> reasons) {
+        for (String key : new String[] {"cpuShare", "cpu_share", "bandwidthShare", "bandwidth_share", "txPowerRatio", "tx_power_ratio"}) {
+            Object value = binding.get(key);
+            if (value instanceof Number) {
+                double number = ((Number) value).doubleValue();
+                if (Double.isNaN(number) || Double.isInfinite(number) || number <= 0.0 || number > 1.0) {
+                    reasons.add("invalid_resource_binding:" + key);
+                }
+            }
+        }
+        Object contactEnd = binding.get("contactEndSec");
+        if (contactEnd instanceof Number && simulation != null && simulation.clock() >= ((Number) contactEnd).doubleValue()) {
+            reasons.add("expired_contact");
+        }
+        if (binding.containsKey("targetVmId") || binding.containsKey("selectedVmId") || binding.containsKey("vmId")) {
+            long target = numberAsLong(binding.get("targetVmId"), numberAsLong(binding.get("selectedVmId"), numberAsLong(binding.get("vmId"), -1L)));
+            if (!vmIdAvailable(target)) reasons.add("target_unavailable");
+        }
+        if (binding.containsKey("targetVmIndex") || binding.containsKey("vmIndex")) {
+            int index = numberAsInt(binding.get("targetVmIndex"), numberAsInt(binding.get("vmIndex"), -1));
+            if (simulationManager != null && simulationManager.getServersManager() != null
+                    && (index < 0 || index >= simulationManager.getServersManager().getVmList().size())) {
+                reasons.add("target_unavailable");
+            }
+        }
+    }
+
+    private boolean vmIdAvailable(long target) {
+        if (target < 0L || simulationManager == null || simulationManager.getServersManager() == null) return false;
+        for (org.cloudbus.cloudsim.vms.Vm vm : simulationManager.getServersManager().getVmList()) {
+            if (vm.getId() == target) return true;
+        }
+        return false;
+    }
+
+    private static RlAction actionFromRule(Map<?, ?> rule, Map<String, Object> scalars) {
+        RlAction action = new RlAction();
+        action.decisionId = numberAsLong(scalars.get("decisionId"), -1L);
+        action.requestId = action.decisionId;
+        action.taskId = numberAsLong(scalars.get("taskId"), -1L);
+        action.targetVmIndex = numberAsInt(rule.get("targetVmIndex"), numberAsInt(rule.get("vmIndex"), -1));
+        action.targetVmId = numberAsLong(rule.get("targetVmId"), -1L);
+        action.selectedVmId = numberAsLong(rule.get("selectedVmId"), numberAsLong(rule.get("vmId"), -1L));
+        action.policyUpperAction = numberAsInt(rule.get("policyUpperAction"), numberAsInt(rule.get("abstractAction"), -1));
+        action.abstractAction = numberAsInt(rule.get("abstractAction"), -1);
+        action.policyUpperActionName = rule.get("policyUpperActionName") == null ? "persistent_rule" : String.valueOf(rule.get("policyUpperActionName"));
+        action.abstractActionName = rule.get("abstractActionName") == null ? "persistent_rule" : String.valueOf(rule.get("abstractActionName"));
+        action.cpuShare = numberAsDouble(rule.get("cpuShare"), 1.0);
+        action.bandwidthShare = numberAsDouble(rule.get("bandwidthShare"), 1.0);
+        action.txPowerRatio = numberAsDouble(rule.get("txPowerRatio"), 1.0);
+        return action;
+    }
+
+    private static double numberAsDouble(Object value, double fallback) {
+        return value instanceof Number ? ((Number) value).doubleValue() : fallback;
+    }
+
     private void ensureTopologyReady() {
         if (simulationManager == null || simulationManager.getTopologyOracle() == null
                 || simulationManager.getContactPlan() == null || simulation == null) {
@@ -493,6 +863,138 @@ public class SatEdgeSimSession {
         Map<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("type", ref.type.name());
         result.put("deviceId", ref.deviceId);
+        return result;
+    }
+
+    /**
+     * Cheap monitor path.  No call to bridge.getState() or RlStateBuilder is
+     * allowed here: the DTO is constructed from scalar bridge metadata and
+     * aggregate counters only.
+     */
+    public Map<String, Object> getMonitorState() {
+        Map<String, Object> scalars = bridge.getCurrentDecisionScalars();
+        CheapMonitorState monitor = new CheapMonitorState();
+        monitor.sessionId = sessionId;
+        monitor.status = String.valueOf(scalars.get("status"));
+        monitor.simulationTimeSec = simulation == null ? 0.0 : simulation.clock();
+        monitor.currentDecisionId = numberAsLong(scalars.get("decisionId"), -1L);
+        monitor.currentTaskId = numberAsLong(scalars.get("taskId"), -1L);
+        monitor.sourceDeviceId = numberAsInt(scalars.get("sourceDeviceId"), -1);
+        monitor.currentConfigId = "none";
+        monitor.currentConfigVersion = 0L;
+        int totalTasks = simulationManager == null || simulationManager.getTasksList() == null
+                ? 0 : simulationManager.getTasksList().size();
+        int vmCount = simulationManager == null || simulationManager.getServersManager() == null
+                || simulationManager.getServersManager().getVmList() == null
+                ? 0 : simulationManager.getServersManager().getVmList().size();
+        int datacenterCount = simulationManager == null || simulationManager.getServersManager() == null
+                || simulationManager.getServersManager().getDatacenterList() == null
+                ? 0 : simulationManager.getServersManager().getDatacenterList().size();
+        monitor.queueSummary.put("totalTasks", (double) totalTasks);
+        monitor.queueSummary.put("pendingDecision", monitor.currentTaskId >= 0 ? 1.0 : 0.0);
+        monitor.loadSummary.put("vmCount", (double) vmCount);
+        monitor.loadSummary.put("datacenterCount", (double) datacenterCount);
+        monitor.remainingWorkload.put("simulationHorizonSec", simulationParameters.SIMULATION_TIME);
+        monitor.smallNeighborhood.put("sourceDeviceId", monitor.sourceDeviceId);
+        monitor.smallNeighborhood.put("topologySource", "TopologyOracle");
+        monitor.cachedState.put("lastReceiptAvailable", bridge.getLastExecutionReceipt() != null);
+        monitor.cachedState.put("completionReceiptAvailable", bridge.getLastCompletionReceipt() != null);
+        monitor.predictionUncertainty.put("contactForecast", 0.0);
+        monitor.degradationIndicators.put("simulationFailure", failure == null ? 0.0 : 1.0);
+        monitor.instrumentation.put("candidateEvaluations", 0L);
+        monitor.instrumentation.put("fullStateBuilderInvoked", false);
+        monitor.instrumentation.put("containsFutureStochasticState", false);
+        monitor.instrumentation.put("vmEnumeration", "aggregate_count_only");
+        monitor.instrumentation.put("datacenterEnumeration", "aggregate_count_only");
+        monitor.instrumentation.put("payloadKind", "cheap_monitor");
+        return monitor.toMap();
+    }
+
+    /**
+     * Unified planner-state endpoint.  The current decision state has already
+     * been acquired by the simulation at the orchestration point.  This method
+     * applies scope and budget while constructing the response and records the
+     * acquisition semantics explicitly; it never calls the full builder.
+     */
+    public Map<String, Object> getPlannerState(Map<String, Object> request, boolean compatibilityFull) {
+        Map<String, Object> response = new LinkedHashMap<String, Object>();
+        response.put("contractVersion", ControlPhysicalContract.VERSION);
+        response.put("payloadKind", "planner_state");
+        response.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        response.put("containsFutureStochasticState", false);
+        Map<String, Object> scope = request == null || !(request.get("scope") instanceof Map)
+                ? new LinkedHashMap<String, Object>() : new LinkedHashMap<String, Object>((Map<String, Object>) request.get("scope"));
+        Map<String, Object> budget = request == null || !(request.get("budget") instanceof Map)
+                ? new LinkedHashMap<String, Object>() : new LinkedHashMap<String, Object>((Map<String, Object>) request.get("budget"));
+        if (!hasNonEmptyList(scope)) scope.clear();
+        String fidelityHint = request == null ? null : String.valueOf(request.get("fidelityHint"));
+        int budgetLimit = budgetLimit(budget);
+        RlState state = compatibilityFull
+                ? bridge.getState()
+                : bridge.buildScopedPlannerState(scope, budgetLimit);
+        response.put("status", state.status);
+        response.put("message", state.message);
+        List<Map<String, Object>> candidates = new ArrayList<Map<String, Object>>();
+        if (state.candidateVms != null) {
+            for (RlState.VmView vm : state.candidateVms) candidates.add(vmMap(vm));
+        }
+        int sourceCount = bridge.getCurrentCandidateCount();
+        response.put("sessionId", state.sessionId);
+        response.put("decisionId", state.decisionId);
+        response.put("requestId", state.requestId);
+        response.put("taskId", state.taskId);
+        response.put("sourceDeviceId", state.sourceDeviceId);
+        response.put("task", state.task);
+        response.put("candidateVms", candidates);
+        response.put("actionMask", state.actionMask);
+        response.put("abstractActionMask", state.abstractActionMask);
+        response.put("abstractActionMaskVisible", state.abstractActionMaskVisible);
+        response.put("abstractActionMaskMobilitySafe", state.abstractActionMaskMobilitySafe);
+        response.put("abstractActionMaskCompletionSafe", state.abstractActionMaskCompletionSafe);
+        response.put("scenarioProfile", state.scenarioProfile);
+        response.put("scenarioPhase", state.scenarioPhase);
+        response.put("taskType", state.taskType);
+        response.put("trafficPhase", state.trafficPhase);
+        response.put("configurationViabilityMode", state.configurationViabilityMode);
+        response.put("viableCandidateCount", state.viableCandidateCount);
+        response.put("inviableCandidateCount", state.inviableCandidateCount);
+        response.put("uncertainCandidateCount", state.uncertainCandidateCount);
+        response.put("requestedScope", scope);
+        response.put("appliedScope", scope);
+        response.put("requestedBudget", budget);
+        response.put("appliedBudget", budget);
+        response.put("fidelityHint", fidelityHint);
+        response.put("candidateCountBeforeRestriction", sourceCount);
+        response.put("candidateCountAfterRestriction", candidates.size());
+        response.put("scopeRestrictionApplied", !scope.isEmpty());
+        response.put("budgetRestrictionApplied", budgetLimit >= 0);
+        response.put("budgetAppliedDuringAcquisition", !compatibilityFull && budgetLimit >= 0);
+        response.put("postFilterOnly", false);
+        response.put("fullStateEquivalent", compatibilityFull && scope.isEmpty() && budget.isEmpty());
+        response.put("readEntities", new String[] {"current_task", "selected_candidates", "current_contact_cache"});
+        Map<String, Object> acquisition = new LinkedHashMap<String, Object>();
+        acquisition.put("mode", compatibilityFull ? "legacy_full_state_compatibility" : "native_scoped_candidate_acquisition");
+        acquisition.put("fullStateBuilderInvoked", false);
+        acquisition.put("candidateEvaluations", compatibilityFull ? 0L : candidates.size());
+        acquisition.put("containsFutureStochasticState", false);
+        acquisition.put("requestedScopeAppliedAt", "response_acquisition");
+        response.put("acquisition", acquisition);
+        return response;
+    }
+
+    private static boolean hasNonEmptyList(Map<String, Object> values) {
+        if (values == null || values.isEmpty()) return false;
+        for (Object value : values.values()) {
+            if (value instanceof List && !((List<?>) value).isEmpty()) return true;
+        }
+        return false;
+    }
+
+    public Map<String, Object> getDecisionPlaneStats() {
+        Map<String, Object> result = bridge.getDecisionPlaneStats();
+        result.put("cheapMonitorEndpoint", "/get_monitor_state");
+        result.put("plannerEndpoint", "/get_planner_state");
+        result.put("containsFutureStochasticState", false);
         return result;
     }
 

@@ -16,10 +16,29 @@ Implemented endpoints:
 | `/get_metrics` | GET | Return current aggregate metrics from `SimLog`. |
 | `/close` | POST | Close the active session. |
 | `/health` | GET | Server health check. |
+| `/capabilities` | GET | Contract v2 capability declaration. |
+| `/get_monitor_state` | GET | Bounded cheap monitor with zero candidate evaluation. |
+| `/get_planner_state` | POST | Unified scoped/budgeted planner acquisition. |
+| `/get_planner_state` | GET | Full-state compatibility route. |
+| `/topology/current` | GET | Current physical topology snapshot. |
+| `/topology/contact_plan` | POST | Deterministic contact forecast. |
+| `/configuration/current` | GET | Active reusable configuration. |
+| `/configuration/validate` | POST | Version, target, contact and resource validation. |
+| `/configuration/apply` | POST | Apply reusable selector rules. |
+| `/configuration/dispatch` | POST | Dispatch a pending task under an active rule. |
+| `/advance_world` | POST | CloudSim physical-time advancement with before/after receipt. |
+| `/debug/decision_plane_stats` | GET | Cheap/scoped/full acquisition instrumentation. |
 
 ## Design
 
 CloudSim/SatEdgeSim is not manually advanced one tick at a time. Instead, the simulation runs in a Java background thread and blocks inside `ExternalRLOrchestrator.findVM(...)` whenever a task needs an offloading target. Python calls `/get_state`, computes an action, then calls `/step`. This keeps the original SatEdgeSim task lifecycle, network model, mobility model, and result logging intact.
+
+Contract v2 adds a native scoped planner builder, reusable persistent execution
+rules, and CloudSim `pause(target)` based physical delay. `/advance_world`
+returns a verified before/target clock receipt and resumes the simulation after
+the receipt; it rejects calls made while an external decision is still pending.
+Mid-transfer contact enforcement is intentionally advertised as unsupported
+until the transfer path has a verified interruption receipt.
 
 ## Start server
 
