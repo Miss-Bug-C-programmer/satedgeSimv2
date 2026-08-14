@@ -44,6 +44,11 @@ public class RlState {
     public String denseCoverageMode = "none";
     public List<DenseSourceSummary> denseSourceSummaries = new ArrayList<DenseSourceSummary>();
     public List<DataCenterView> datacenters = new ArrayList<DataCenterView>();
+    public String configurationViabilityMode = "report_only";
+    public int viableCandidateCount;
+    public int inviableCandidateCount;
+    public int uncertainCandidateCount;
+    public String viabilitySummarySource = "unavailable";
     public Map<String, Object> metrics;
     public Map<String, Object> lastDecision;
 
@@ -91,6 +96,13 @@ public class RlState {
         public boolean linkAvailable;
         public boolean linkAvailableNow;
         public double estimatedLinkLifetimeSec;
+        public String linkLifetimeSource;
+        public boolean linkLifetimeCensored;
+        public Double currentContactEndSec;
+        public Double nextContactStartSec;
+        public Double nextContactEndSec;
+        public double contactForecastHorizonSec;
+        public boolean contactForecastSufficient;
         public double distanceToSource;
         public double sourceDistance;
         public double propagationDelaySec;
@@ -111,6 +123,14 @@ public class RlState {
         public String mobilityRiskSource = "unavailable";
         public boolean mobilitySafe;
         public boolean completionSafe;
+        public String viabilityStatus;
+        public String viabilityReason;
+        public String viabilitySource;
+        public boolean viabilityEvaluated;
+        public boolean viabilityContactEndCensored;
+        public double viabilityAvailableContactSec;
+        public double viabilityRequiredContactSec;
+        public double viabilityServiceMarginSec;
         public int estimatedQueueLength;
         public String queueEstimateSource = "unknown";
         public boolean isFeasible;

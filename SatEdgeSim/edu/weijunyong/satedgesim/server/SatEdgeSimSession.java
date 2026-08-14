@@ -26,6 +26,12 @@ import edu.weijunyong.satedgesim.ScenarioManager.Scenario;
 import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
 import edu.weijunyong.satedgesim.SimulationManager.SimLog;
 import edu.weijunyong.satedgesim.SimulationManager.SimulationManager;
+import edu.weijunyong.satedgesim.Topology.ContactForecast;
+import edu.weijunyong.satedgesim.Topology.ContactPlan;
+import edu.weijunyong.satedgesim.Topology.ContactWindow;
+import edu.weijunyong.satedgesim.Topology.LinkSnapshot;
+import edu.weijunyong.satedgesim.Topology.TopologyNodeRef;
+import edu.weijunyong.satedgesim.Topology.TopologyOracle;
 import edu.weijunyong.satedgesim.TasksGenerator.DefaultTasksGenerator;
 import edu.weijunyong.satedgesim.TasksGenerator.Task;
 import edu.weijunyong.satedgesim.TasksGenerator.TasksGenerator;
@@ -318,6 +324,192 @@ public class SatEdgeSimSession {
 
     public Map<String, Object> getReceiptStats() {
         return bridge.getReceiptStats();
+    }
+
+    public Map<String, Object> getCurrentTopology() {
+        ensureTopologyReady();
+        double timeSec = simulation.clock();
+        List<DataCenter> activeNodes = simulationManager.getServersManager().getDatacenterList();
+        Map<String, Object> response = new LinkedHashMap<String, Object>();
+        response.put("simulationTimeSec", timeSec);
+        response.put("source", TopologyOracle.SOURCE);
+        List<Map<String, Object>> nodes = new java.util.ArrayList<Map<String, Object>>();
+        for (DataCenter dataCenter : activeNodes) {
+            TopologyNodeRef ref = TopologyOracle.toRef(dataCenter);
+            edu.weijunyong.satedgesim.Topology.TopologyPosition position = simulationManager.getTopologyOracle().getPosition(ref, timeSec);
+            Map<String, Object> node = new LinkedHashMap<String, Object>();
+            node.put("type", ref.type.name());
+            node.put("deviceId", ref.deviceId);
+            node.put("x", position.xMeters);
+            node.put("y", position.yMeters);
+            node.put("z", position.zMeters);
+            nodes.add(node);
+        }
+        response.put("nodes", nodes);
+        List<Map<String, Object>> links = new java.util.ArrayList<Map<String, Object>>();
+        for (DataCenter source : activeNodes) {
+            for (DataCenter destination : activeNodes) {
+                if (source == destination) continue;
+                links.add(linkMap(simulationManager.getTopologyOracle().getLinkSnapshot(source, destination, timeSec)));
+            }
+        }
+        response.put("links", links);
+        return response;
+    }
+
+    public Map<String, Object> getContactPlan(Map<String, Object> request) {
+        ensureTopologyReady();
+        TopologyNodeRef source = parseNodeRef(request, "source");
+        TopologyNodeRef destination = parseNodeRef(request, "destination");
+        DataCenter sourceDataCenter = findActiveNode(source);
+        DataCenter destinationDataCenter = findActiveNode(destination);
+        if (sourceDataCenter == null || destinationDataCenter == null) {
+            throw new IllegalArgumentException("contact-plan nodes must belong to the active session: "
+                    + source + " -> " + destination);
+        }
+        Object horizonValue = request == null ? null : request.get("horizonSec");
+        double horizon = horizonValue instanceof Number ? ((Number) horizonValue).doubleValue()
+                : simulationParameters.TOPOLOGY_FORECAST_HORIZON_SEC;
+        double now = simulation.clock();
+        ContactForecast forecast = simulationManager.getContactPlan().getContactForecast(source, destination, now, horizon);
+        Map<String, Object> response = new LinkedHashMap<String, Object>();
+        response.put("simulationTimeSec", now);
+        response.put("forecastType", "deterministic_orbit_contact");
+        response.put("sourceType", forecast.source);
+        response.put("containsFutureStochasticState", false);
+        response.put("source", nodeMap(source));
+        response.put("destination", nodeMap(destination));
+        response.put("availableNow", forecast.availableNow);
+        response.put("remainingLifetimeSec", forecast.remainingLifetimeSec);
+        response.put("remainingLifetimeCensored", forecast.remainingLifetimeCensored);
+        response.put("currentContactEndSec", forecast.currentContactEndSec);
+        response.put("nextContactStartSec", forecast.nextContactStartSec);
+        response.put("nextContactEndSec", forecast.nextContactEndSec);
+        response.put("forecastStartSec", forecast.forecastStartSec);
+        response.put("forecastEndSec", forecast.forecastEndSec);
+        response.put("effectiveHorizonSec", forecast.effectiveHorizonSec);
+        List<Map<String, Object>> windows = new java.util.ArrayList<Map<String, Object>>();
+        for (ContactWindow window : forecast.windows) {
+            Map<String, Object> item = new LinkedHashMap<String, Object>();
+            item.put("startSec", window.startSec);
+            item.put("endSec", window.endSec);
+            item.put("durationSec", window.durationSec);
+            item.put("startsInsideQuery", window.startsInsideQuery);
+            item.put("endsInsideQuery", window.endsInsideQuery);
+            item.put("leftCensored", window.leftCensored);
+            item.put("rightCensored", window.rightCensored);
+            windows.add(item);
+        }
+        response.put("windows", windows);
+        return response;
+    }
+
+    public Map<String, Object> getContactPlanStats() {
+        ensureTopologyReady();
+        ContactPlan.Stats stats = simulationManager.getContactPlan().getStats();
+        Map<String, Object> response = new LinkedHashMap<String, Object>();
+        response.put("cacheHits", stats.cacheHits);
+        response.put("cacheMisses", stats.cacheMisses);
+        response.put("pairsCached", stats.pairsCached);
+        response.put("contactWindowsGenerated", stats.contactWindowsGenerated);
+        response.put("topologyQueries", stats.topologyQueries);
+        return response;
+    }
+
+    /** Current-task configuration viability report; report-only, no action mutation. */
+    public Map<String, Object> getConfigurationViability() {
+        RlState state = bridge.getState();
+        Map<String, Object> response = new LinkedHashMap<String, Object>();
+        response.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        response.put("status", state.status);
+        response.put("mode", simulationParameters.CONFIGURATION_VIABILITY_MODE);
+        response.put("source", "current_rl_state");
+        response.put("taskId", state.taskId);
+        response.put("decisionId", state.decisionId);
+        response.put("scenarioProfile", state.scenarioProfile);
+        response.put("isControlledRlScenario", state.isControlledRlScenario);
+        response.put("viableCandidateCount", state.viableCandidateCount);
+        response.put("inviableCandidateCount", state.inviableCandidateCount);
+        response.put("uncertainCandidateCount", state.uncertainCandidateCount);
+        response.put("viabilitySummarySource", state.viabilitySummarySource);
+        List<Map<String, Object>> candidates = new java.util.ArrayList<Map<String, Object>>();
+        for (RlState.VmView vm : state.candidateVms) {
+            Map<String, Object> item = new LinkedHashMap<String, Object>();
+            item.put("vmIndex", vm.vmIndex);
+            item.put("vmId", vm.vmId);
+            item.put("datacenterType", vm.datacenterType);
+            item.put("datacenterDeviceId", vm.datacenterDeviceId);
+            item.put("abstractAction", vm.abstractAction);
+            item.put("viabilityStatus", vm.viabilityStatus);
+            item.put("viabilityReason", vm.viabilityReason);
+            item.put("viabilitySource", vm.viabilitySource);
+            item.put("viabilityEvaluated", vm.viabilityEvaluated);
+            item.put("contactEndCensored", vm.viabilityContactEndCensored);
+            item.put("availableContactSec", vm.viabilityAvailableContactSec);
+            item.put("requiredContactSec", vm.viabilityRequiredContactSec);
+            item.put("serviceMarginSec", vm.viabilityServiceMarginSec);
+            item.put("linkAvailableNow", vm.linkAvailableNow);
+            item.put("estimatedLinkLifetimeSec", vm.estimatedLinkLifetimeSec);
+            item.put("estimatedTaskCompletionTimeSec", vm.estimatedTaskCompletionTimeSec);
+            candidates.add(item);
+        }
+        response.put("candidates", candidates);
+        return response;
+    }
+
+    private void ensureTopologyReady() {
+        if (simulationManager == null || simulationManager.getTopologyOracle() == null
+                || simulationManager.getContactPlan() == null || simulation == null) {
+            throw new IllegalStateException("topology backend is not ready");
+        }
+    }
+
+    private DataCenter findActiveNode(TopologyNodeRef ref) {
+        for (DataCenter dataCenter : simulationManager.getServersManager().getDatacenterList()) {
+            if (dataCenter.getType() == ref.type && dataCenter.getDeviceID() == ref.deviceId) return dataCenter;
+        }
+        return null;
+    }
+
+    private static TopologyNodeRef parseNodeRef(Map<String, Object> request, String field) {
+        if (request == null || !(request.get(field) instanceof Map)) {
+            throw new IllegalArgumentException("missing " + field + " node object");
+        }
+        Map<?, ?> node = (Map<?, ?>) request.get(field);
+        Object typeValue = node.get("type");
+        Object idValue = node.get("deviceId");
+        if (typeValue == null || !(idValue instanceof Number)) {
+            throw new IllegalArgumentException(field + " requires type and positive deviceId");
+        }
+        try {
+            simulationParameters.TYPES type = simulationParameters.TYPES.valueOf(String.valueOf(typeValue));
+            return new TopologyNodeRef(type, ((Number) idValue).intValue());
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("invalid " + field + " node: " + typeValue + "/" + idValue);
+        }
+    }
+
+    private static Map<String, Object> nodeMap(TopologyNodeRef ref) {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("type", ref.type.name());
+        result.put("deviceId", ref.deviceId);
+        return result;
+    }
+
+    private static Map<String, Object> linkMap(LinkSnapshot snapshot) {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("sourceType", snapshot.sourceType.name());
+        result.put("sourceDeviceId", snapshot.source.deviceId);
+        result.put("destinationType", snapshot.destinationType.name());
+        result.put("destinationDeviceId", snapshot.destination.deviceId);
+        result.put("timeSec", snapshot.timeSec);
+        result.put("distanceMeters", snapshot.distanceMeters);
+        result.put("geometryVisible", snapshot.geometryVisible);
+        result.put("withinRange", snapshot.withinRange);
+        result.put("available", snapshot.available);
+        result.put("maxRangeMeters", snapshot.maxRangeMeters);
+        result.put("elevationDeg", snapshot.elevationDeg);
+        return result;
     }
 
     public void recordTimeoutSuspected() {

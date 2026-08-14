@@ -8,7 +8,7 @@ SatEdgeSim 是一个基于 CloudSim Plus 的卫星边缘计算仿真器。本项
 4 GEO + 28 LEO + 12 Ground gateway
 ```
 
-本轮实现的范围是物理拓扑、确定性轨迹、基于几何的可见性判定、区域场景配置和验证工具；没有实现新的 DRL 算法、Configuration Viability、KEEP/RECONFIGURE、VoC 或 world model。
+本轮实现的范围包括物理拓扑、确定性轨迹、基于几何的可见性判定、区域场景配置、ContactPlan 和 report-only Configuration Viability；没有实现新的 DRL 算法、KEEP/RECONFIGURE、VoC 或 world model。
 
 ## 1. 快速开始
 
@@ -670,9 +670,20 @@ flowchart TB
 │   ├── edu/weijunyong/satedgesim/
 │   │   ├── DataCentersManager/
 │   │   ├── LocationManager/
-│   │   ├── Network/
-│   │   │   ├── LinkGeometry.java
-│   │   │   └── LinkGeometrySmoke.java
+    │   │   ├── Network/
+    │   │   │   ├── LinkGeometry.java
+    │   │   │   └── LinkGeometrySmoke.java
+    │   │   ├── Topology/
+    │   │   │   ├── TrajectoryPositionProvider.java
+    │   │   │   ├── TopologyOracle.java
+    │   │   │   ├── LinkSnapshot.java
+    │   │   │   ├── ContactWindow.java
+    │   │   │   ├── ContactForecast.java
+    │   │   │   ├── ContactPlan.java
+    │   │   │   └── TopologyOracleSmoke.java
+    │   │   ├── Viability/
+    │   │   │   ├── ConfigurationViability.java
+    │   │   │   └── ConfigurationViabilitySmoke.java
 │   │   ├── ScenarioManager/
 │   │   ├── SimulationManager/
 │   │   ├── TasksGenerator/
@@ -750,7 +761,59 @@ Ground = 6,378,137 m
 
 `scenarioProfile=default` 时使用真实 ECEF 轨迹和几何可见性。LEO 邻居、GEO 和 Ground 链路不保证在每个时刻都可见，这是动态卫星拓扑的预期行为。
 
-## 12. 故障排查
+## 12. TopologyOracle 与 ContactPlan
+
+`TopologyOracle` 复用 `FilesParser` 已加载的三类轨迹，支持 double simulation time 和线性插值；它不在 future query 时重复读取 CSV，也不会循环回轨迹起点。
+
+`ContactPlan` 以有序 `(source, destination)` 为缓存 key，首次查询扫描完整 deterministic trace，之后从缓存窗口中快速查询当前 contact、剩余 lifetime 和 next contact。ContactPlan 只描述：
+
+```text
+position + geometry visibility + directional communication range
+```
+
+它不暴露未来的 task arrival、queue、CPU/VM load、channel realization、reward 或 offloading decision。超过查询区间或 trace 末端的窗口通过 `leftCensored` / `rightCensored` 表示边界不确定性。
+
+### 当前拓扑接口
+
+```text
+GET  /topology/current
+POST /topology/contact_plan
+GET  /debug/contact_plan_stats
+```
+
+contact plan 请求示例：
+
+```json
+{
+  "source": {"type": "EDGE_DEVICE", "deviceId": 1},
+  "destination": {"type": "EDGE_DATACENTER", "deviceId": 1},
+  "horizonSec": 600
+}
+```
+
+`/topology/current` 返回当前 44 个 active node 以及有序链路快照；`/topology/contact_plan` 会校验节点属于当前 session。默认实际场景的 `/get_state` remote candidate 使用：
+
+```text
+linkLifetimeSource = deterministic_contact_plan
+```
+
+controlled synthetic profile 仍使用 `controlled_estimate`，用于保持旧测试兼容。
+
+### 第二阶段验证
+
+```powershell
+mvn -DskipTests compile exec:java `
+  '-Dexec.mainClass=edu.weijunyong.satedgesim.Network.LinkGeometrySmoke'
+
+mvn -DskipTests compile exec:java `
+  '-Dexec.mainClass=edu.weijunyong.satedgesim.Topology.TopologyOracleSmoke'
+
+python scripts/validate_contact_plan.py --base-url http://127.0.0.1:8088
+```
+
+Linux 将 `python` 替换为 `python3`，并使用反斜杠续行。也可以阅读 [docs/topology_oracle_contact_plan.md](docs/topology_oracle_contact_plan.md)。
+
+## 13. 故障排查
 
 ### `/reset` 返回 `settings files failed validation`
 
@@ -807,13 +870,35 @@ GET /get_state
 
 选择一个 `candidateVms[].feasible=true` 的候选 VM，再调用 `/step`。
 
-## 13. 当前限制和后续方向
+## 14. Configuration Viability 与当前限制
 
-- `estimatedLinkLifetimeSec` 仍是现有 heuristic，本轮没有重写。
+当前已增加 report-only Configuration Viability：
+
+```text
+GET /configuration/viability
+```
+
+它只比较当前 candidate 的 deterministic contact lifetime、estimated completion time 和 configured survival margin，输出 `VIABLE`、`INVIABLE` 或 `UNCERTAIN`。它不会修改 action mask、选择目标 VM、执行 KEEP/REPLAN 或读取未来 stochastic state。详细说明见 [docs/configuration_viability.md](docs/configuration_viability.md)。
+
+## 15. Configuration Viability 与当前限制
+
+当前已增加 report-only Configuration Viability：
+
+```text
+GET /configuration/viability
+```
+
+它只比较当前 candidate 的 deterministic contact lifetime、estimated completion time 和 configured survival margin，输出 `VIABLE`、`INVIABLE` 或 `UNCERTAIN`。它不会修改 action mask、选择目标 VM、执行 KEEP/REPLAN 或读取未来 stochastic state。详细说明见 [docs/configuration_viability.md](docs/configuration_viability.md)。
+
+## 16. 当前限制和后续方向
+
+- 本轮已将默认 actual path 的 `estimatedLinkLifetimeSec` 切换为 ContactPlan 的 deterministic contact lifetime；旧的 relative-speed heuristic 仅保留在 controlled synthetic compatibility path。
 - 尚未接入真实 TLE/SGP4 数据。
 - 尚未实现 RF link budget、天气衰减或地面 backbone。
 - `scenario.json` 当前是 metadata，不是 Java 仿真的强依赖配置。
 - 旧默认 settings 仍保留，区域场景通过独立目录加载。
+- `estimatedLinkLifetimeSec` 的 contact boundary 仍受 `contact_scan_step_sec` 和 `contact_refine_tolerance_sec` 的离散扫描精度影响。
+- 本轮新增 Configuration Viability 的 report-only evaluator；仍未实现 Persistent Configuration、KEEP/REPLAN、VoC、planning budget 或新的 DRL controller。
 
 下一阶段可以在不改变本 README 所述 REST/RL 接口的前提下，将确定性轨迹扩展为：
 
@@ -823,4 +908,3 @@ trajectory
     -> deterministic contact lifetime
     -> configuration viability
 ```
-

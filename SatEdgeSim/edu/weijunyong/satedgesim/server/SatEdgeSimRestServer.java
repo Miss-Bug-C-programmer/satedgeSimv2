@@ -179,6 +179,39 @@ public class SatEdgeSimRestServer {
                 return ok(session.getReceiptStats());
             }
         });
+        server.createContext("/topology/current", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getCurrentTopology());
+            }
+        });
+        server.createContext("/topology/contact_plan", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                Map<String, Object> request = gson.fromJson(body, Map.class);
+                return ok(session.getContactPlan(request));
+            }
+        });
+        server.createContext("/debug/contact_plan_stats", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getContactPlanStats());
+            }
+        });
+        server.createContext("/configuration/viability", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getConfigurationViability());
+            }
+        });
         int threads = Math.max(8, Runtime.getRuntime().availableProcessors() * 2);
         server.setExecutor((ThreadPoolExecutor) Executors.newFixedThreadPool(threads));
         server.start();

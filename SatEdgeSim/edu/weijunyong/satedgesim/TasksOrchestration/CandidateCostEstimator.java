@@ -3,6 +3,7 @@ package edu.weijunyong.satedgesim.TasksOrchestration;
 import org.cloudbus.cloudsim.vms.Vm;
 
 import edu.weijunyong.satedgesim.DataCentersManager.DataCenter;
+import edu.weijunyong.satedgesim.Topology.LinkAvailability;
 import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
 import edu.weijunyong.satedgesim.TasksGenerator.Task;
 
@@ -24,7 +25,8 @@ public final class CandidateCostEstimator {
         info.queueEstimateSource = queueEstimateSource == null || "".equals(queueEstimateSource) ? "unknown" : queueEstimateSource;
         info.sourceDistance = info.isLocalToSource ? 0.0 : SimulationManagerShim.distance(source, destination);
         info.propagationDelaySec = propagationDelaySec(info.sourceDistance);
-        info.linkAvailable = info.isLocalToSource || SimulationManagerShim.hasLink(source, destination);
+        info.linkAvailable = info.isLocalToSource || (SimulationManagerShim.hasLink(source, destination)
+                && LinkAvailability.withinRange(info.sourceDistance, destination.getType()));
         info.estimatedTransmissionRateMbps = estimateRateMbps(vm, destination, info.isLocalToSource);
         info.estimatedComputeCapacity = Math.max(1.0, vm.getMips() * Math.max(1.0, vm.getNumberOfPes()));
         info.estimatedTransmissionDelaySec = transmissionDelaySec(task, info.estimatedTransmissionRateMbps, info.isLocalToSource, 1.0);

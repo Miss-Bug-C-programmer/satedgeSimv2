@@ -11,6 +11,12 @@ import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
 import edu.weijunyong.satedgesim.SimulationManager.SimLog;
 import edu.weijunyong.satedgesim.SimulationManager.SimulationManager;
 import edu.weijunyong.satedgesim.TasksGenerator.Task;
+import edu.weijunyong.satedgesim.Topology.ContactForecast;
+import edu.weijunyong.satedgesim.Topology.ContactPlan;
+import edu.weijunyong.satedgesim.Topology.TopologyNodeRef;
+import edu.weijunyong.satedgesim.Topology.TopologyOracle;
+import edu.weijunyong.satedgesim.Topology.LinkAvailability;
+import edu.weijunyong.satedgesim.Viability.ConfigurationViability;
 
 public abstract class Orchestrator {
 	public static final int ACTION_LOCAL = 0;
@@ -30,6 +36,13 @@ public abstract class Orchestrator {
 		public boolean linkAvailable = false;
 		public boolean linkAvailableNow = false;
 		public double estimatedLinkLifetimeSec = 0.0;
+		public String linkLifetimeSource = "unavailable";
+		public boolean linkLifetimeCensored = false;
+		public Double currentContactEndSec = null;
+		public Double nextContactStartSec = null;
+		public Double nextContactEndSec = null;
+		public double contactForecastHorizonSec = 0.0;
+		public boolean contactForecastSufficient = false;
 		public double sourceDistance = 0.0;
 		public double propagationDelaySec = 0.0;
 		public double estimatedTransmissionRateMbps = 0.0;
@@ -49,6 +62,7 @@ public abstract class Orchestrator {
 		public String mobilityRiskSource = "unavailable";
 		public boolean mobilitySafe = false;
 		public boolean completionSafe = false;
+		public ConfigurationViability.Report viabilityReport = null;
 		public int estimatedQueueLength = 0;
 		public String queueEstimateSource = "unknown";
 		public boolean isFeasible = false;
@@ -414,7 +428,24 @@ public abstract class Orchestrator {
 		info.estimatedTaskTransmissionTimeSec = Math.max(0.0, info.estimatedTransmissionDelaySec);
 		info.estimatedTaskComputeTimeSec = Math.max(0.0, info.estimatedComputeDelaySec);
 		info.estimatedTaskCompletionTimeSec = Math.max(0.0, info.estimatedTotalDelaySec);
-		info.estimatedLinkLifetimeSec = estimateLinkLifetimeSec(simulationManager, source, destination, info, controlledEstimate);
+		ContactForecast forecast = null;
+		if (!controlledEstimate && !info.isLocalToSource && simulationManager != null
+				&& simulationManager.getContactPlan() != null && source != null && destination != null) {
+			forecast = simulationManager.getContactPlan().getContactForecast(
+					TopologyOracle.toRef(source), TopologyOracle.toRef(destination),
+					simulationManager.getSimulation().clock(),
+					simulationManager.getContactPlan().getConfiguredHorizonSec());
+			info.linkAvailable = forecast.availableNow;
+			info.linkAvailableNow = forecast.availableNow;
+			info.linkLifetimeSource = ContactPlan.LIFETIME_SOURCE;
+			info.linkLifetimeCensored = forecast.remainingLifetimeCensored;
+			info.currentContactEndSec = forecast.currentContactEndSec;
+			info.nextContactStartSec = forecast.nextContactStartSec;
+			info.nextContactEndSec = forecast.nextContactEndSec;
+			info.contactForecastHorizonSec = forecast.effectiveHorizonSec;
+			info.contactForecastSufficient = !forecast.remainingLifetimeCensored;
+		}
+		info.estimatedLinkLifetimeSec = estimateLinkLifetimeSec(simulationManager, source, destination, info, controlledEstimate, forecast);
 		info.linkSurvivalMarginSec = info.estimatedLinkLifetimeSec - info.estimatedTaskTransmissionTimeSec;
 		info.linkSurvivalMarginToCompletionSec = info.estimatedLinkLifetimeSec - info.estimatedTaskCompletionTimeSec;
 		info.handoverRequired = !info.isLocalToSource && info.linkSurvivalMarginSec < 0.0;
@@ -422,6 +453,14 @@ public abstract class Orchestrator {
 		double minMargin = Math.max(0.0, simulationParameters.RL_MIN_LINK_SURVIVAL_MARGIN_SEC);
 		info.mobilitySafe = info.isLocalToSource || (info.linkAvailableNow && info.linkSurvivalMarginSec >= minMargin);
 		info.completionSafe = info.isLocalToSource || (info.linkAvailableNow && info.linkSurvivalMarginToCompletionSec >= minMargin);
+		info.viabilityReport = ConfigurationViability.evaluate(
+				info.isLocalToSource,
+				info.linkAvailableNow,
+				info.estimatedLinkLifetimeSec,
+				info.estimatedTaskCompletionTimeSec,
+				minMargin,
+				info.linkLifetimeCensored,
+				info.linkLifetimeSource);
 		if (info.isLocalToSource) {
 			info.mobilityRisk = 0.0;
 		} else if (!info.linkAvailableNow) {
@@ -433,7 +472,7 @@ public abstract class Orchestrator {
 		} else {
 			info.mobilityRisk = 0.0;
 		}
-		info.mobilityRiskSource = controlledEstimate ? "controlled_estimate" : "actual";
+		info.mobilityRiskSource = controlledEstimate ? "controlled_estimate" : ContactPlan.SOURCE;
 	}
 
 	private static double estimateLinkLifetimeSec(
@@ -441,10 +480,30 @@ public abstract class Orchestrator {
 			DataCenter source,
 			DataCenter destination,
 			FeasibilityInfo info,
-			boolean controlledEstimate) {
+			boolean controlledEstimate,
+			ContactForecast forecast) {
 		if (info.isLocalToSource) {
+			info.linkLifetimeSource = "local";
+			info.contactForecastSufficient = true;
 			return 1.0e9;
 		}
+		if (!controlledEstimate && forecast != null) {
+			return forecast.remainingLifetimeSec;
+		}
+		if (controlledEstimate) {
+			info.linkLifetimeSource = "controlled_estimate";
+			return estimateControlledLinkLifetimeSec(simulationManager, source, destination, info);
+		}
+		info.linkLifetimeSource = "unavailable";
+		return 0.0;
+	}
+
+	/** Legacy relative-speed estimate retained only for controlled synthetic profiles. */
+	private static double estimateControlledLinkLifetimeSec(
+			SimulationManager simulationManager,
+			DataCenter source,
+			DataCenter destination,
+			FeasibilityInfo info) {
 		if (source == null || destination == null) {
 			return 0.0;
 		}
@@ -454,16 +513,16 @@ public abstract class Orchestrator {
 		if (!info.linkAvailableNow) {
 			return 0.0;
 		}
-		double relSpeed = estimatedRelativeSpeedMps(simulationManager, source, destination, info.abstractAction, controlledEstimate);
+		double relSpeed = controlledRelativeSpeedMps(simulationManager, source, destination, info.abstractAction);
 		return marginDistance / Math.max(1.0, relSpeed);
 	}
 
-	private static double estimatedRelativeSpeedMps(
+	/** Synthetic-profile compatibility only; never used by deterministic actual mode. */
+	private static double controlledRelativeSpeedMps(
 			SimulationManager simulationManager,
 			DataCenter source,
 			DataCenter destination,
-			int abstractAction,
-			boolean controlledEstimate) {
+			int abstractAction) {
 		double floor = Math.max(10.0, simulationParameters.UPDATE_INTERVAL <= 0.0 ? 100.0 : (50.0 / simulationParameters.UPDATE_INTERVAL));
 		double base;
 		if (abstractAction == ACTION_NEIGHBOR) {
@@ -481,9 +540,7 @@ public abstract class Orchestrator {
 		double dynamic = Math.max(0.0, SimulationManager.getdistance(source, destination));
 		double scaled = dynamic / Math.max(10.0, simulationParameters.EDGE_DEVICES_RANGE);
 		double estimate = base * Math.max(0.5, Math.min(2.0, scaled));
-		if (controlledEstimate) {
-			estimate *= 1.10;
-		}
+		estimate *= 1.10;
 		return Math.max(floor, estimate);
 	}
 
@@ -1192,13 +1249,7 @@ public abstract class Orchestrator {
 	}
 
 	private static int tierRange(DataCenter destination) {
-		if (destination.getType() == simulationParameters.TYPES.CLOUD) {
-			return simulationParameters.CLOUD_RANGE;
-		}
-		if (destination.getType() == simulationParameters.TYPES.EDGE_DATACENTER) {
-			return simulationParameters.EDGE_DATACENTERS_RANGE;
-		}
-		return simulationParameters.EDGE_DEVICES_RANGE;
+		return (int) LinkAvailability.maxRangeMeters(destination.getType());
 	}
 
 	//{A && B && [C ||(D && E)]} || {A && B && [C ||(D && E)]} || {A && B && [C ||(D && E) && F]}

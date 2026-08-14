@@ -11,6 +11,10 @@ import edu.weijunyong.satedgesim.DataCentersManager.DataCenter;
 import edu.weijunyong.satedgesim.DataCentersManager.ServersManager;
 import edu.weijunyong.satedgesim.Network.NetworkModel;
 import edu.weijunyong.satedgesim.Network.LinkGeometry;
+import edu.weijunyong.satedgesim.Topology.ContactPlan;
+import edu.weijunyong.satedgesim.Topology.TopologyOracle;
+import edu.weijunyong.satedgesim.Topology.TrajectoryPositionProvider;
+import edu.weijunyong.satedgesim.Topology.LinkAvailability;
 import edu.weijunyong.satedgesim.ScenarioManager.Scenario;
 import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
 import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters.TYPES;
@@ -44,6 +48,8 @@ public class SimulationManager extends CloudSimEntity {
 	private NetworkModel networkModel;
 	private List<? extends DataCenter> orchestratorsList;
 	private double failedTasksCount = 0;
+	private TopologyOracle topologyOracle;
+	private ContactPlan contactPlan;
 	private int tasksCount = 0;
 	private int waittoendCount = 0;
 
@@ -423,14 +429,9 @@ public class SimulationManager extends CloudSimEntity {
 	}
 
 	private boolean sameLocation(DataCenter Dev1, DataCenter Dev2) {
-		int RANGE = simulationParameters.EDGE_DEVICES_RANGE;
-		if (Dev1.getType() == TYPES.CLOUD || Dev2.getType() == TYPES.CLOUD) {
-			RANGE = simulationParameters.CLOUD_RANGE;
-		} else if (Dev1.getType() == TYPES.EDGE_DATACENTER || Dev2.getType() == TYPES.EDGE_DATACENTER) {
-			RANGE = simulationParameters.EDGE_DATACENTERS_RANGE;
-		}
+		double range = LinkAvailability.maxRangeMeters(Dev2.getType());
 		double distance = getdistance(Dev1, Dev2);
-		if (distance < RANGE && issetlink(Dev1, Dev2)) {
+		if (distance < range && issetlink(Dev1, Dev2)) {
 			//System.out.println("Simulation"+ Dev1.getId()+" the same location with"+ Dev2.getId());
 			return true;
 		}
@@ -460,10 +461,23 @@ public class SimulationManager extends CloudSimEntity {
 		// Get orchestrators list from the server manager
 		orchestratorsList = serversManager.getOrchestratorsList();
 		this.serversManager = serversManager;
+		this.topologyOracle = new TopologyOracle(new TrajectoryPositionProvider());
+		this.contactPlan = new ContactPlan(topologyOracle,
+				simulationParameters.TOPOLOGY_FORECAST_HORIZON_SEC,
+				simulationParameters.CONTACT_SCAN_STEP_SEC,
+				simulationParameters.CONTACT_REFINE_TOLERANCE_SEC);
 
 		// Submit vm list to the broker
 		simLog.deepLog("SimulationManager- Submitting VM list to the broker");
 		broker.submitVmList(serversManager.getVmList());
+	}
+
+	public TopologyOracle getTopologyOracle() {
+		return topologyOracle;
+	}
+
+	public ContactPlan getContactPlan() {
+		return contactPlan;
 	}
 
 	public void setTasksList(List<Task> tasksList) {

@@ -14,6 +14,7 @@ import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
 import edu.weijunyong.satedgesim.TasksGenerator.Task;
 import edu.weijunyong.satedgesim.TasksOrchestration.CandidateCostEstimator;
 import edu.weijunyong.satedgesim.TasksOrchestration.Orchestrator;
+import edu.weijunyong.satedgesim.Viability.ConfigurationViability;
 
 public final class RlStateBuilder {
     private RlStateBuilder() {
@@ -48,6 +49,7 @@ public final class RlStateBuilder {
         state.actionMaskMode = normalizeActionMaskMode(simulationParameters.RL_ACTION_MASK_MODE);
         state.minLinkSurvivalMarginSec = Math.max(0.0, simulationParameters.RL_MIN_LINK_SURVIVAL_MARGIN_SEC);
         state.isControlledRlScenario = simulationParameters.RL_IS_CONTROLLED_SCENARIO;
+        state.configurationViabilityMode = simulationParameters.CONFIGURATION_VIABILITY_MODE;
         state.metrics = metrics;
         DataCenter effectiveSource = Orchestrator.resolveEffectiveSource(simulationManager, task);
         state.task = buildTask(task, effectiveSource);
@@ -59,6 +61,10 @@ public final class RlStateBuilder {
         int[] abstractMaskVisible = new int[] { 0, 0, 0, 0 };
         int[] abstractMaskMobilitySafe = new int[] { 0, 0, 0, 0 };
         int[] abstractMaskCompletionSafe = new int[] { 0, 0, 0, 0 };
+        int viableCandidateCount = 0;
+        int inviableCandidateCount = 0;
+        int uncertainCandidateCount = 0;
+        String viabilitySummarySource = null;
         for (int i = 0; i < vmList.size(); i++) {
             Vm vm = vmList.get(i);
             Orchestrator.FeasibilityInfo info = Orchestrator.evaluateOffloading(simulationManager, task, vm, architecture, orchestrationHistory, i);
@@ -71,6 +77,14 @@ public final class RlStateBuilder {
             }
             RlState.VmView view = buildVm(i, vm, effectiveSource, task, info);
             state.candidateVms.add(view);
+            if ("VIABLE".equals(view.viabilityStatus)) viableCandidateCount++;
+            else if ("UNCERTAIN".equals(view.viabilityStatus)) uncertainCandidateCount++;
+            else if ("INVIABLE".equals(view.viabilityStatus)) inviableCandidateCount++;
+            if (viabilitySummarySource == null || viabilitySummarySource.isEmpty()) {
+                viabilitySummarySource = view.viabilitySource;
+            } else if (view.viabilitySource != null && !viabilitySummarySource.equals(view.viabilitySource)) {
+                viabilitySummarySource = "mixed";
+            }
             boolean activeFeasible = isCandidateAllowedForMode(view, state.actionMaskMode);
             state.actionMask.add(activeFeasible ? 1 : 0);
             if (view.isFeasible && view.abstractAction >= 0 && view.abstractAction < abstractMaskVisible.length) {
@@ -95,6 +109,10 @@ public final class RlStateBuilder {
             state.abstractActionMaskCompletionSafe.add(abstractMaskCompletionSafe[i]);
         }
         state.denseCoverageMode = "source_projection";
+        state.viableCandidateCount = viableCandidateCount;
+        state.inviableCandidateCount = inviableCandidateCount;
+        state.uncertainCandidateCount = uncertainCandidateCount;
+        state.viabilitySummarySource = viabilitySummarySource == null ? "unavailable" : viabilitySummarySource;
         state.denseSourceSummaries = buildDenseSourceSummaries(
                 simulationManager,
                 architecture,
@@ -169,6 +187,13 @@ public final class RlStateBuilder {
             view.linkAvailable = info.linkAvailable;
             view.linkAvailableNow = info.linkAvailableNow;
             view.estimatedLinkLifetimeSec = info.estimatedLinkLifetimeSec;
+            view.linkLifetimeSource = info.linkLifetimeSource;
+            view.linkLifetimeCensored = info.linkLifetimeCensored;
+            view.currentContactEndSec = info.currentContactEndSec;
+            view.nextContactStartSec = info.nextContactStartSec;
+            view.nextContactEndSec = info.nextContactEndSec;
+            view.contactForecastHorizonSec = info.contactForecastHorizonSec;
+            view.contactForecastSufficient = info.contactForecastSufficient;
             view.datacenterCpuUtilization = dc.getCurrentCpuUtilization();
             view.datacenterBatteryPercent = dc.isBattery() ? dc.getBatteryLevelPercentage() : 100.0;
             view.datacenterDead = dc.isDead();
@@ -190,6 +215,16 @@ public final class RlStateBuilder {
             view.mobilityRiskSource = info.mobilityRiskSource == null ? "unavailable" : info.mobilityRiskSource;
             view.mobilitySafe = info.mobilitySafe;
             view.completionSafe = info.completionSafe;
+            if (info.viabilityReport != null) {
+                view.viabilityStatus = info.viabilityReport.status.name();
+                view.viabilityReason = info.viabilityReport.reason;
+                view.viabilitySource = info.viabilityReport.source;
+                view.viabilityEvaluated = info.viabilityReport.evaluated;
+                view.viabilityContactEndCensored = info.viabilityReport.contactEndCensored;
+                view.viabilityAvailableContactSec = info.viabilityReport.availableContactSec;
+                view.viabilityRequiredContactSec = info.viabilityReport.requiredContactSec;
+                view.viabilityServiceMarginSec = info.viabilityReport.serviceMarginSec;
+            }
         } else {
             view.logicalTier = "UNKNOWN";
             view.abstractAction = -1;

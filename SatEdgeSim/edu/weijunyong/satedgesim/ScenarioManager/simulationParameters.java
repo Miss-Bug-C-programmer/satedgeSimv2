@@ -54,6 +54,11 @@ public class simulationParameters {
 	public static double MIN_HEIGHT;			  //sat min_height(in meters)
 	public static double GROUND_MIN_ELEVATION_DEG = 10.0;
 	public static double ISL_MIN_CLEARANCE_METERS = 100000.0;
+	public static String TOPOLOGY_FORECAST_MODE = "deterministic_trajectory";
+	public static double TOPOLOGY_FORECAST_HORIZON_SEC = 600.0;
+	public static double CONTACT_SCAN_STEP_SEC = 1.0;
+	public static double CONTACT_REFINE_TOLERANCE_SEC = 0.1;
+	public static String CONFIGURATION_VIABILITY_MODE = "report_only";
 	
 	// Edge devices, server,datacenters..
 	public static int NUM_OF_EDGE_DATACENTERS;    // Number of edge data centers

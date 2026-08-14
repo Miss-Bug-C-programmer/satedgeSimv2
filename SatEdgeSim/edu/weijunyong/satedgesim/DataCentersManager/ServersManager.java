@@ -36,6 +36,7 @@ import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
 import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters.TYPES;
 import edu.weijunyong.satedgesim.SimulationManager.SimLog;
 import edu.weijunyong.satedgesim.SimulationManager.SimulationManager;
+import edu.weijunyong.satedgesim.Topology.TrajectoryPositionProvider;
 
 public class ServersManager {
 	private List<DataCenter> datacentersList;
@@ -357,40 +358,16 @@ public class ServersManager {
 	}
 	
 	public static double[] Setnodelocation(List<Map<String,List<String>>> locationinfo, int id, int timeindex){
+		if (locationinfo == null || locationinfo.isEmpty()) {
+			SimLog.println("ServersManager- locationinfo List is null, check the '.csv' file.");
+			simulationParameters.abort("SatEdgeSim requested termination");
+		}
+		if (timeindex < 0) timeindex = 0;
 		if (simulationParameters.LOCATIONTIMENUM < timeindex) {
-			SimLog.println("ServersManager- This time (" +timeindex +") is Overflow ");
-			timeindex = timeindex % simulationParameters.LOCATIONTIMENUM;
+			SimLog.println("ServersManager- This time (" + timeindex + ") is Overflow ");
+			timeindex = simulationParameters.LOCATIONTIMENUM;
 		}
-		String i1 = "",i2 = "",i3 = "";
-        double xpos =0,ypos =0,zpos =simulationParameters.EARTH_RADIUS;
-		if (locationinfo.size() !=0) {
-			if(!(locationinfo.get(1).isEmpty())) {
-				i1 = locationinfo.get(id-1).get("2").get(timeindex+1);
-	     		i2 = locationinfo.get(id-1).get("3").get(timeindex+1);
-	     		i3 = locationinfo.get(id-1).get("4").get(timeindex+1);
-			}
-	 		else {
-	 			SimLog.println("ServersManager- locationinfo Map is null, check the '.csv' file.");
-				simulationParameters.abort("SatEdgeSim requested termination");  
-	 		}
-	 		xpos = Double.parseDouble(i1)*1000;
-	 		ypos = Double.parseDouble(i2)*1000;
-	 		zpos = Double.parseDouble(i3)*1000;
-	 		//System.out.println("The location is: "+xpos + "," + ypos + "," + zpos);
-	 		double Geohigh = Math.abs(Math.sqrt(Math.pow(xpos, 2)+ Math.pow(ypos, 2)+ Math.pow(zpos, 2)));
-			// CSV coordinates are rounded decimal kilometres; allow tiny numerical
-			// noise at the physical Earth-radius boundary.
-			if(simulationParameters.EARTH_RADIUS - Geohigh > 1.0e-3) {
-	 	    	SimLog.println("ServersManager- locationinfo Id:"+ id + " Incorrect data. Time is: " +timeindex +", check the '.csv' file.");
-				simulationParameters.abort("SatEdgeSim requested termination"); 
-	 	    }
-		}
- 	    else {
- 	    	SimLog.println("ServersManager- locationinfo List is null, check the '.csv' file.");
-			simulationParameters.abort("SatEdgeSim requested termination"); 
- 	    }
-		double[] locationPos= {xpos,ypos,zpos};
-		return locationPos;
+		return TrajectoryPositionProvider.readLegacyPosition(locationinfo, id, timeindex);
 	}
 	
 	/*

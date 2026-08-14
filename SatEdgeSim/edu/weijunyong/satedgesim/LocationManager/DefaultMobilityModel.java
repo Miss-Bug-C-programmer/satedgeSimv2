@@ -2,6 +2,8 @@ package edu.weijunyong.satedgesim.LocationManager;
 
 import edu.weijunyong.satedgesim.DataCentersManager.ServersManager;
 import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
+import edu.weijunyong.satedgesim.Topology.TopologyPosition;
+import edu.weijunyong.satedgesim.Topology.TrajectoryPositionProvider;
 
 public class DefaultMobilityModel extends Mobility {
 
@@ -15,23 +17,14 @@ public class DefaultMobilityModel extends Mobility {
 	}
 
 	public Location getNextLocation(int ID, double Simulationtime, String type) {
-		int time = (int)Simulationtime; //double
-		//String FID = Integer.toString(ID);
-		//String fileName = null;
-		double[] locationPos;
-		if ("cloud".equals(type)) {
-			locationPos= ServersManager.Setnodelocation(simulationParameters.Cloudlocationinfo,ID,time);
-		} else if ("edge".equals(type)) {
-			locationPos= ServersManager.Setnodelocation(simulationParameters.EdgeDataCenterslocationinfo,ID,time);
-		} else {
-			//fileName = MainApplication.getLocationFolder() + "edge_devices/mist Fixed Position.csv";
-			locationPos= ServersManager.Setnodelocation(simulationParameters.EdgeDeviceslocationinfo,ID,time);
-		}
-		
-    	
-    	Double x_position = locationPos[0];
-    	Double y_position = locationPos[1];
-    	Double z_position = locationPos[2];
+		simulationParameters.TYPES nodeType;
+		if ("cloud".equals(type)) nodeType = simulationParameters.TYPES.CLOUD;
+		else if ("edge".equals(type)) nodeType = simulationParameters.TYPES.EDGE_DATACENTER;
+		else nodeType = simulationParameters.TYPES.EDGE_DEVICE;
+		TopologyPosition position = new TrajectoryPositionProvider().getPosition(nodeType, ID, Simulationtime);
+		Double x_position = position.xMeters;
+		Double y_position = position.yMeters;
+		Double z_position = position.zMeters;
     	currentLocation = new Location(x_position, y_position, z_position);
     	//System.out.println("DefaultMobilityModel: "+type + FID+ " Location is: "+ x_position+","+y_position+","+z_position);
 		return new Location(x_position, y_position, z_position);

@@ -21,20 +21,41 @@ public final class LinkGeometry {
         if (first == second || first.getId() == second.getId()) {
             return true;
         }
-        boolean firstGround = first.getType() == simulationParameters.TYPES.EDGE_DATACENTER;
-        boolean secondGround = second.getType() == simulationParameters.TYPES.EDGE_DATACENTER;
-        double[] firstVector = locationVector(first.getLocation());
-        double[] secondVector = locationVector(second.getLocation());
-        if (firstGround && secondGround) {
+        return isVisible(first.getType(), locationVector(first.getLocation()),
+                second.getType(), locationVector(second.getLocation()));
+    }
+
+    /** Unified raw-vector visibility API used by future-time topology queries. */
+    public static boolean isVisible(simulationParameters.TYPES firstType, double[] firstPosition,
+            simulationParameters.TYPES secondType, double[] secondPosition) {
+        if (firstType == null || secondType == null || firstPosition == null || secondPosition == null
+                || firstPosition.length != 3 || secondPosition.length != 3) {
             return false;
+        }
+        boolean firstGround = firstType == simulationParameters.TYPES.EDGE_DATACENTER;
+        boolean secondGround = secondType == simulationParameters.TYPES.EDGE_DATACENTER;
+        if (firstGround && secondGround) {
+            return distance(firstPosition, secondPosition) == 0.0;
         }
         if (firstGround || secondGround) {
             return isGroundSatelliteVisible(
-                    firstGround ? firstVector : secondVector,
-                    firstGround ? secondVector : firstVector,
+                    firstGround ? firstPosition : secondPosition,
+                    firstGround ? secondPosition : firstPosition,
                     groundMinElevationDeg());
         }
-        return isSatelliteLinkVisible(firstVector, secondVector, earthRadiusMeters(), islMinClearanceMeters());
+        return isSatelliteLinkVisible(firstPosition, secondPosition, earthRadiusMeters(), islMinClearanceMeters());
+    }
+
+    public static double groundElevationDeg(double[] ground, double[] satellite) {
+        if (ground == null || satellite == null || ground.length != 3 || satellite.length != 3) {
+            return Double.NaN;
+        }
+        double[] los = subtract(satellite, ground);
+        double denominator = norm(los) * norm(ground);
+        if (denominator == 0.0) return 90.0;
+        double sine = dot(los, ground) / denominator;
+        sine = Math.max(-1.0, Math.min(1.0, sine));
+        return Math.toDegrees(Math.asin(sine));
     }
 
     public static boolean isGroundSatelliteVisible(double[] ground, double[] satellite, double minimumElevationDeg) {

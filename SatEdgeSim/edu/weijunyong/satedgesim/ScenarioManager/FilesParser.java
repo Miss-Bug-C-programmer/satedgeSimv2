@@ -107,6 +107,16 @@ public class FilesParser {
 				prop.getProperty("ground_min_elevation_deg", "10").trim());
 			simulationParameters.ISL_MIN_CLEARANCE_METERS = Double.parseDouble(
 				prop.getProperty("isl_min_clearance_m", "100000").trim());
+			simulationParameters.TOPOLOGY_FORECAST_MODE = prop.getProperty(
+				"topology_forecast_mode", "deterministic_trajectory").trim();
+			simulationParameters.TOPOLOGY_FORECAST_HORIZON_SEC = Double.parseDouble(prop.getProperty(
+				"topology_forecast_horizon_sec", "600").trim());
+			simulationParameters.CONTACT_SCAN_STEP_SEC = Double.parseDouble(prop.getProperty(
+				"contact_scan_step_sec", "1.0").trim());
+			simulationParameters.CONTACT_REFINE_TOLERANCE_SEC = Double.parseDouble(prop.getProperty(
+				"contact_refine_tolerance_sec", "0.1").trim());
+			simulationParameters.CONFIGURATION_VIABILITY_MODE = prop.getProperty(
+				"configuration_viability_mode", "report_only").trim();
 			simulationParameters.UPDATE_INTERVAL = Double.parseDouble(prop.getProperty("update_interval").trim()); // seconds
 			simulationParameters.DEEP_LOGGING = Boolean.parseBoolean(prop.getProperty("deep_log_enabled").trim());
 			simulationParameters.SAVE_LOG = Boolean.parseBoolean(prop.getProperty("save_log_file").trim());
