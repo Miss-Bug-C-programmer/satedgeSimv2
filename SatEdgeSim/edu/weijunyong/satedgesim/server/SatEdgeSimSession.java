@@ -12,6 +12,7 @@ import java.util.Set;
 import java.util.UUID;
 
 import org.cloudbus.cloudsim.core.CloudSim;
+import org.cloudbus.cloudsim.vms.Vm;
 import org.cloudsimplus.util.Log;
 
 import ch.qos.logback.classic.Level;
@@ -22,6 +23,7 @@ import edu.weijunyong.satedgesim.DataCentersManager.EnergyModel;
 import edu.weijunyong.satedgesim.DataCentersManager.ServersManager;
 import edu.weijunyong.satedgesim.LocationManager.DefaultMobilityModel;
 import edu.weijunyong.satedgesim.LocationManager.Mobility;
+import edu.weijunyong.satedgesim.Network.FileTransferProgress;
 import edu.weijunyong.satedgesim.Network.DefaultNetworkModel;
 import edu.weijunyong.satedgesim.Network.NetworkModel;
 import edu.weijunyong.satedgesim.ScenarioManager.FilesParser;
@@ -54,6 +56,7 @@ public class SatEdgeSimSession {
     private SimLog simLog;
     private volatile Throwable failure;
     private PersistentExecutionConfiguration currentConfiguration;
+    private double configurationAppliedAtSec = Double.NaN;
     private long configurationReceiptSequence = 0L;
 
     private Class<? extends Mobility> mobilityManager = DefaultMobilityModel.class;
@@ -577,6 +580,8 @@ public class SatEdgeSimSession {
         result.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
         result.put("configId", currentConfiguration == null ? null : currentConfiguration.configId);
         result.put("version", currentConfiguration == null ? 0L : currentConfiguration.version);
+        result.put("configurationAgeSec", currentConfiguration == null || !Double.isFinite(configurationAppliedAtSec)
+                ? null : Math.max(0.0, simulation.clock() - configurationAppliedAtSec));
         result.put("configuration", currentConfiguration == null ? null : currentConfiguration.toMap());
         result.put("containsFutureStochasticState", false);
         return result;
@@ -694,6 +699,9 @@ public class SatEdgeSimSession {
                 && currentConfiguration.toMap().equals(candidate.toMap());
         Map<String, Object> before = currentConfiguration == null ? new LinkedHashMap<String, Object>() : currentConfiguration.toMap();
         currentConfiguration = candidate;
+        if (!idempotent || !Double.isFinite(configurationAppliedAtSec)) {
+            configurationAppliedAtSec = simulation == null ? Double.NaN : simulation.clock();
+        }
         bridge.setPersistentConfiguration(candidate);
         configurationReceiptSequence += 1L;
         receipt.put("receiptType", "configuration_apply");
@@ -876,38 +884,219 @@ public class SatEdgeSimSession {
         CheapMonitorState monitor = new CheapMonitorState();
         monitor.sessionId = sessionId;
         monitor.status = String.valueOf(scalars.get("status"));
-        monitor.simulationTimeSec = simulation == null ? 0.0 : simulation.clock();
+        double now = simulation == null ? 0.0 : simulation.clock();
+        monitor.simulationTimeSec = now;
         monitor.currentDecisionId = numberAsLong(scalars.get("decisionId"), -1L);
         monitor.currentTaskId = numberAsLong(scalars.get("taskId"), -1L);
         monitor.sourceDeviceId = numberAsInt(scalars.get("sourceDeviceId"), -1);
-        monitor.currentConfigId = "none";
-        monitor.currentConfigVersion = 0L;
-        int totalTasks = simulationManager == null || simulationManager.getTasksList() == null
-                ? 0 : simulationManager.getTasksList().size();
-        int vmCount = simulationManager == null || simulationManager.getServersManager() == null
-                || simulationManager.getServersManager().getVmList() == null
-                ? 0 : simulationManager.getServersManager().getVmList().size();
-        int datacenterCount = simulationManager == null || simulationManager.getServersManager() == null
-                || simulationManager.getServersManager().getDatacenterList() == null
-                ? 0 : simulationManager.getServersManager().getDatacenterList().size();
-        monitor.queueSummary.put("totalTasks", (double) totalTasks);
+        monitor.currentConfigId = currentConfiguration == null ? null : currentConfiguration.configId;
+        monitor.currentConfigVersion = currentConfiguration == null ? 0L : currentConfiguration.version;
+        if (currentConfiguration != null && Double.isFinite(configurationAppliedAtSec)) {
+            monitor.configurationAgeSec = Math.max(0.0, now - configurationAppliedAtSec);
+        }
+        List<Task> tasks = simulationManager == null ? null : simulationManager.getTasksList();
+        populateArrivedWorkload(monitor, tasks, now);
+        populateCurrentServiceRate(monitor, tasks, now);
+        populateCurrentTransferContact(monitor, now);
         monitor.queueSummary.put("pendingDecision", monitor.currentTaskId >= 0 ? 1.0 : 0.0);
-        monitor.loadSummary.put("vmCount", (double) vmCount);
-        monitor.loadSummary.put("datacenterCount", (double) datacenterCount);
-        monitor.remainingWorkload.put("simulationHorizonSec", simulationParameters.SIMULATION_TIME);
         monitor.smallNeighborhood.put("sourceDeviceId", monitor.sourceDeviceId);
         monitor.smallNeighborhood.put("topologySource", "TopologyOracle");
         monitor.cachedState.put("lastReceiptAvailable", bridge.getLastExecutionReceipt() != null);
         monitor.cachedState.put("completionReceiptAvailable", bridge.getLastCompletionReceipt() != null);
-        monitor.predictionUncertainty.put("contactForecast", 0.0);
         monitor.degradationIndicators.put("simulationFailure", failure == null ? 0.0 : 1.0);
         monitor.instrumentation.put("candidateEvaluations", 0L);
         monitor.instrumentation.put("fullStateBuilderInvoked", false);
         monitor.instrumentation.put("containsFutureStochasticState", false);
-        monitor.instrumentation.put("vmEnumeration", "aggregate_count_only");
-        monitor.instrumentation.put("datacenterEnumeration", "aggregate_count_only");
+        if (!monitor.instrumentation.containsKey("serviceRateLowerBoundAvailable")) {
+            monitor.instrumentation.put("serviceRateLowerBoundAvailable", false);
+        }
+        monitor.instrumentation.put("serviceHorizonAvailable", false);
+        if (!monitor.instrumentation.containsKey("contactSlackAvailable")) {
+            monitor.instrumentation.put("contactSlackAvailable", false);
+        }
+        monitor.instrumentation.put("predictionUncertaintyAvailable", false);
         monitor.instrumentation.put("payloadKind", "cheap_monitor");
+        if (!monitor.cachedState.containsKey("serviceRateSource")) {
+            monitor.cachedState.put("serviceRateSource", "unavailable_at_cheap_monitor_cost");
+        }
+        if (!monitor.cachedState.containsKey("contactSlackSource")) {
+            monitor.cachedState.put("contactSlackSource", "unavailable_at_cheap_monitor_cost");
+        }
+        monitor.cachedState.put("predictionUncertaintySource", "unavailable_not_calibrated");
         return monitor.toMap();
+    }
+
+    /**
+     * Reports only the service actually visible on VMs already assigned to
+     * arrived, unfinished tasks.  It does not enumerate candidate VMs and does
+     * not treat VM inventory as service capacity.
+     */
+    private static void populateCurrentServiceRate(CheapMonitorState monitor, List<Task> tasks, double now) {
+        if (tasks == null) return;
+        Set<Long> observedVmIds = new HashSet<Long>();
+        double serviceRateMips = 0.0;
+        int observedVms = 0;
+        for (Task task : tasks) {
+            if (task == null || task.getTime() > now + 1.0e-9 || isTerminalTask(task)) continue;
+            Vm vm = task.getVm();
+            if (vm == null || vm == Vm.NULL || !observedVmIds.add(vm.getId())) continue;
+            observedVms++;
+            double currentMips = vm.getTotalCpuMipsUsage();
+            if (!Double.isNaN(currentMips) && !Double.isInfinite(currentMips)) {
+                serviceRateMips += Math.max(0.0, currentMips);
+            }
+        }
+        if (observedVms > 0) {
+            monitor.serviceRateLowerBound = serviceRateMips;
+            monitor.instrumentation.put("serviceRateLowerBoundAvailable", true);
+            monitor.instrumentation.put("serviceRateScope", "assigned_arrived_tasks");
+            monitor.instrumentation.put("serviceRateObservedVmCount", observedVms);
+            monitor.cachedState.put("serviceRateSource", "cloudsim_vm_scheduler_current_mips");
+        }
+    }
+
+    /**
+     * Uses only transfers that are currently present in the native network
+     * progress list.  Contact slack is the current contact lifetime minus the
+     * remaining transfer time at the native current bandwidth.
+     */
+    private void populateCurrentTransferContact(CheapMonitorState monitor, double now) {
+        if (simulationManager == null || simulationManager.getNetworkModel() == null
+                || simulationManager.getContactPlan() == null || simulationManager.getNetworkModel().getTransferProgressList() == null) {
+            return;
+        }
+        int observedTransfers = 0;
+        int contactSlackObservations = 0;
+        for (FileTransferProgress transfer : new ArrayList<FileTransferProgress>(simulationManager.getNetworkModel().getTransferProgressList())) {
+            if (transfer == null || transfer.getTask() == null || transfer.getRemainingFileSize() <= 0.0) continue;
+            DataCenter source = transferSource(transfer);
+            DataCenter destination = transferDestination(transfer);
+            if (source == null || destination == null || source == destination) continue;
+            ContactForecast forecast;
+            try {
+                forecast = simulationManager.getContactPlan().getContactForecast(
+                        TopologyOracle.toRef(source), TopologyOracle.toRef(destination), now,
+                        simulationParameters.TOPOLOGY_FORECAST_HORIZON_SEC);
+            } catch (RuntimeException unavailable) {
+                continue;
+            }
+            String key = "transfer:" + transfer.getTask().getId() + ":" + transfer.getTransferType().name();
+            double remainingLifetime = forecast.availableNow ? forecast.remainingLifetimeSec : 0.0;
+            monitor.remainingContactLifetime.put(key, remainingLifetime);
+            Map<String, Object> next = new LinkedHashMap<String, Object>();
+            next.put("availableNow", forecast.availableNow);
+            next.put("remainingLifetimeSec", remainingLifetime);
+            next.put("source", forecast.source);
+            if (forecast.nextContactStartSec != null) next.put("nextContactStartSec", forecast.nextContactStartSec);
+            if (forecast.nextContactEndSec != null) next.put("nextContactEndSec", forecast.nextContactEndSec);
+            monitor.nextContact.put(key, next);
+            observedTransfers++;
+            double currentBandwidth = transfer.getCurrentBandwidth();
+            if (currentBandwidth > 0.0 && !Double.isNaN(currentBandwidth) && !Double.isInfinite(currentBandwidth)) {
+                double remainingTransferTime = transfer.getRemainingFileSize() / currentBandwidth;
+                monitor.contactSlack.put(key, remainingLifetime - remainingTransferTime);
+                contactSlackObservations++;
+            }
+        }
+        if (observedTransfers > 0) {
+            monitor.instrumentation.put("contactSlackAvailable", contactSlackObservations > 0);
+            monitor.instrumentation.put("contactObservationCount", observedTransfers);
+            monitor.cachedState.put("contactSlackSource", "native_transfer_progress_and_contact_plan");
+        }
+    }
+
+    private static DataCenter transferSource(FileTransferProgress transfer) {
+        Task task = transfer.getTask();
+        switch (transfer.getTransferType()) {
+        case REQUEST:
+            return task.getEdgeDevice();
+        case TASK:
+            return task.getOrchestrator();
+        case RESULTS_TO_ORCH:
+            return destinationDataCenter(task);
+        case RESULTS_TO_DEV:
+            return task.getOrchestrator();
+        case CONTAINER:
+            return task.getRegistry();
+        default:
+            return null;
+        }
+    }
+
+    private static DataCenter transferDestination(FileTransferProgress transfer) {
+        Task task = transfer.getTask();
+        switch (transfer.getTransferType()) {
+        case REQUEST:
+            return task.getOrchestrator();
+        case TASK:
+            return destinationDataCenter(task);
+        case RESULTS_TO_ORCH:
+            return task.getOrchestrator();
+        case RESULTS_TO_DEV:
+            return task.getEdgeDevice();
+        case CONTAINER:
+            return task.getEdgeDevice();
+        default:
+            return null;
+        }
+    }
+
+    private static DataCenter destinationDataCenter(Task task) {
+        if (task == null || task.getVm() == null || task.getVm() == Vm.NULL
+                || task.getVm().getHost() == null
+                || !(task.getVm().getHost().getDatacenter() instanceof DataCenter)) {
+            return null;
+        }
+        return (DataCenter) task.getVm().getHost().getDatacenter();
+    }
+
+    private static boolean isTerminalTask(Task task) {
+        if (task.isFinished()) return true;
+        org.cloudbus.cloudsim.cloudlets.Cloudlet.Status status = task.getStatus();
+        return status == org.cloudbus.cloudsim.cloudlets.Cloudlet.Status.SUCCESS
+                || status == org.cloudbus.cloudsim.cloudlets.Cloudlet.Status.FAILED
+                || status == org.cloudbus.cloudsim.cloudlets.Cloudlet.Status.CANCELED
+                || status == org.cloudbus.cloudsim.cloudlets.Cloudlet.Status.FAILED_RESOURCE_UNAVAILABLE;
+    }
+
+    /**
+     * Aggregates only task records that have arrived by the current simulation
+     * time.  This is intentionally independent of VM/candidate enumeration and
+     * is also used by the DTO regression test.
+     */
+    static void populateArrivedWorkload(CheapMonitorState monitor, List<Task> tasks, double now) {
+        double arrivedTaskCount = 0.0;
+        double unfinishedTaskCount = 0.0;
+        double totalRemainingWorkload = 0.0;
+        double futureTaskCount = 0.0;
+        if (tasks != null) {
+            for (Task task : tasks) {
+                if (task == null) continue;
+                if (task.getTime() > now + 1.0e-9) {
+                    futureTaskCount += 1.0;
+                    continue;
+                }
+                arrivedTaskCount += 1.0;
+                if (isTerminalTask(task)) continue;
+                unfinishedTaskCount += 1.0;
+                long remaining = Math.max(0L, task.getLength() - task.getFinishedLengthSoFar());
+                totalRemainingWorkload += remaining;
+                String source = task.getEdgeDevice() == null
+                        ? "unknown" : String.valueOf(task.getEdgeDevice().getDeviceID());
+                String sourceKey = "source:" + source;
+                monitor.remainingWorkload.put(sourceKey,
+                        monitor.remainingWorkload.containsKey(sourceKey)
+                                ? monitor.remainingWorkload.get(sourceKey) + remaining : (double) remaining);
+                double deadlineSlack = task.getMaxLatency() - (now - task.getTime());
+                monitor.deadlineSlack.put(String.valueOf(task.getId()), deadlineSlack);
+            }
+        }
+        monitor.queueSummary.put("arrivedTaskCount", arrivedTaskCount);
+        monitor.queueSummary.put("unfinishedTaskCount", unfinishedTaskCount);
+        monitor.remainingWorkload.put("total", totalRemainingWorkload);
+        monitor.instrumentation.put("futureTaskCountExcluded", futureTaskCount);
+        monitor.instrumentation.put("remainingWorkloadSource", "arrived_unfinished_cloudlets");
+        monitor.instrumentation.put("deadlineSlackSource", "Task.maxLatency_minus_current_time");
     }
 
     /**

@@ -15,6 +15,12 @@ public final class CheapMonitorState {
     public double simulationTimeSec;
     public String currentConfigId;
     public long currentConfigVersion;
+    /** Null means that no active configuration has been applied in this session. */
+    public Double configurationAgeSec;
+    /** Null means that a bounded current service-rate estimate is unavailable. */
+    public Double serviceRateLowerBound;
+    /** Null means that a service horizon was not observable at monitor cost. */
+    public Double serviceHorizonSec;
     public long currentDecisionId = -1L;
     public long currentTaskId = -1L;
     public int sourceDeviceId = -1;
@@ -41,6 +47,9 @@ public final class CheapMonitorState {
         result.put("simulationTimeSec", simulationTimeSec);
         result.put("configId", currentConfigId);
         result.put("configVersion", currentConfigVersion);
+        result.put("configurationAgeSec", configurationAgeSec);
+        result.put("serviceRateLowerBound", serviceRateLowerBound);
+        result.put("serviceHorizonSec", serviceHorizonSec);
         result.put("currentDecisionId", currentDecisionId);
         result.put("currentTaskId", currentTaskId);
         result.put("sourceDeviceId", sourceDeviceId);
