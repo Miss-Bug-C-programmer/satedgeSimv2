@@ -10,7 +10,7 @@ import edu.weijunyong.satedgesim.TasksGenerator.Task;
 public class ControlPhysicalContractTest {
     public static void main(String[] args) {
         Map<String, Object> capabilities = ControlPhysicalContract.capabilities(false, null);
-        require("2.0".equals(capabilities.get("controlPhysicalContractVersion")), "contract version");
+        require("2.1".equals(capabilities.get("controlPhysicalContractVersion")), "contract version");
         require(Boolean.TRUE.equals(capabilities.get("supportsCheapMonitor")), "cheap monitor capability");
         require(Boolean.TRUE.equals(capabilities.get("supportsScopedPlannerState")), "scoped planner capability");
         require(Boolean.FALSE.equals(capabilities.get("futureStochasticTruthExposed")), "future truth must be hidden");
@@ -35,6 +35,9 @@ public class ControlPhysicalContractTest {
         Map<String, Object> monitorMap = monitor.toMap();
         require("cheap_monitor".equals(monitorMap.get("payloadKind")), "monitor payload kind");
         require(Boolean.FALSE.equals(monitorMap.get("containsFutureStochasticState")), "monitor future truth");
+        require(Boolean.FALSE.equals(monitorMap.get("serviceBoundCertified")), "service bound must be uncertified by default");
+        require(monitorMap.get("serviceRateLowerBound") == null, "missing lower bound must remain missing");
+        require("not_certified".equals(monitorMap.get("serviceBoundSemantics")), "service semantics must be explicit");
 
         Task unfinished = new Task(1, 100L, 1L) {
             @Override

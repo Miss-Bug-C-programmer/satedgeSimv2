@@ -907,9 +907,9 @@ public class SatEdgeSimSession {
         monitor.instrumentation.put("candidateEvaluations", 0L);
         monitor.instrumentation.put("fullStateBuilderInvoked", false);
         monitor.instrumentation.put("containsFutureStochasticState", false);
-        if (!monitor.instrumentation.containsKey("serviceRateLowerBoundAvailable")) {
-            monitor.instrumentation.put("serviceRateLowerBoundAvailable", false);
-        }
+        monitor.instrumentation.put("serviceRateObservedAvailable", monitor.serviceRateObserved != null);
+        monitor.instrumentation.put("serviceRateLowerBoundAvailable", monitor.serviceRateLowerBound != null && monitor.serviceBoundCertified);
+        monitor.instrumentation.put("serviceBoundCertified", monitor.serviceBoundCertified);
         monitor.instrumentation.put("serviceHorizonAvailable", false);
         if (!monitor.instrumentation.containsKey("contactSlackAvailable")) {
             monitor.instrumentation.put("contactSlackAvailable", false);
@@ -947,11 +947,18 @@ public class SatEdgeSimSession {
             }
         }
         if (observedVms > 0) {
-            monitor.serviceRateLowerBound = serviceRateMips;
-            monitor.instrumentation.put("serviceRateLowerBoundAvailable", true);
+            monitor.serviceRateObserved = serviceRateMips;
+            monitor.serviceRateLowerBound = null;
+            monitor.serviceBoundCertified = false;
+            monitor.serviceRateSource = "cloudsim_vm_scheduler_current_mips";
+            monitor.serviceBoundSemantics = "instantaneous_observed_usage_not_future_lower_bound";
+            monitor.instrumentation.put("serviceRateObservedAvailable", true);
+            monitor.instrumentation.put("serviceRateLowerBoundAvailable", false);
+            monitor.instrumentation.put("serviceBoundCertified", false);
             monitor.instrumentation.put("serviceRateScope", "assigned_arrived_tasks");
             monitor.instrumentation.put("serviceRateObservedVmCount", observedVms);
-            monitor.cachedState.put("serviceRateSource", "cloudsim_vm_scheduler_current_mips");
+            monitor.cachedState.put("serviceRateSource", monitor.serviceRateSource);
+            monitor.cachedState.put("serviceBoundSemantics", monitor.serviceBoundSemantics);
         }
     }
 

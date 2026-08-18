@@ -8,7 +8,7 @@ import java.util.Map;
  * candidate VM list and is built without invoking RlStateBuilder.
  */
 public final class CheapMonitorState {
-    public String contractVersion = "2.0";
+    public String contractVersion = "2.1";
     public String payloadKind = "cheap_monitor";
     public String status = "RUNNING";
     public String sessionId;
@@ -17,8 +17,13 @@ public final class CheapMonitorState {
     public long currentConfigVersion;
     /** Null means that no active configuration has been applied in this session. */
     public Double configurationAgeSec;
-    /** Null means that a bounded current service-rate estimate is unavailable. */
+    /** Current scheduler-derived observation; it is not a future guarantee. */
+    public Double serviceRateObserved;
+    /** Non-null only when a separately proven conservative lower bound exists. */
     public Double serviceRateLowerBound;
+    public boolean serviceBoundCertified = false;
+    public String serviceRateSource = "unavailable_at_cheap_monitor_cost";
+    public String serviceBoundSemantics = "not_certified";
     /** Null means that a service horizon was not observable at monitor cost. */
     public Double serviceHorizonSec;
     public long currentDecisionId = -1L;
@@ -48,7 +53,11 @@ public final class CheapMonitorState {
         result.put("configId", currentConfigId);
         result.put("configVersion", currentConfigVersion);
         result.put("configurationAgeSec", configurationAgeSec);
+        result.put("serviceRateObserved", serviceRateObserved);
         result.put("serviceRateLowerBound", serviceRateLowerBound);
+        result.put("serviceBoundCertified", serviceBoundCertified);
+        result.put("serviceRateSource", serviceRateSource);
+        result.put("serviceBoundSemantics", serviceBoundSemantics);
         result.put("serviceHorizonSec", serviceHorizonSec);
         result.put("currentDecisionId", currentDecisionId);
         result.put("currentTaskId", currentTaskId);
