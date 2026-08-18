@@ -828,6 +828,10 @@ public class SatEdgeSimSession {
         action.cpuShare = numberAsDouble(rule.get("cpuShare"), 1.0);
         action.bandwidthShare = numberAsDouble(rule.get("bandwidthShare"), 1.0);
         action.txPowerRatio = numberAsDouble(rule.get("txPowerRatio"), 1.0);
+        Object bindingMode = rule.get("bindingMode");
+        if (bindingMode == null) bindingMode = rule.get("continuous_resource_binding_mode");
+        if (bindingMode == null) bindingMode = rule.get("continuousResourceBindingMode");
+        if (bindingMode != null) action.extra.put("bindingMode", String.valueOf(bindingMode));
         return action;
     }
 
@@ -898,6 +902,7 @@ public class SatEdgeSimSession {
         populateArrivedWorkload(monitor, tasks, now);
         populateCurrentServiceRate(monitor, tasks, now);
         populateCurrentTransferContact(monitor, now);
+        populatePhaseAwareWorkloadAndApplicability(monitor, tasks, now);
         monitor.queueSummary.put("pendingDecision", monitor.currentTaskId >= 0 ? 1.0 : 0.0);
         monitor.smallNeighborhood.put("sourceDeviceId", monitor.sourceDeviceId);
         monitor.smallNeighborhood.put("topologySource", "TopologyOracle");
@@ -910,7 +915,19 @@ public class SatEdgeSimSession {
         monitor.instrumentation.put("serviceRateObservedAvailable", monitor.serviceRateObserved != null);
         monitor.instrumentation.put("serviceRateLowerBoundAvailable", monitor.serviceRateLowerBound != null && monitor.serviceBoundCertified);
         monitor.instrumentation.put("serviceBoundCertified", monitor.serviceBoundCertified);
-        monitor.instrumentation.put("serviceHorizonAvailable", false);
+        monitor.instrumentation.put("serviceHorizonAvailable", monitor.serviceHorizonSec != null);
+        monitor.instrumentation.put("serviceEvidenceStatus", monitor.serviceEvidenceStatus);
+        monitor.instrumentation.put("serviceHorizonSource", monitor.serviceHorizonSource);
+        monitor.instrumentation.put("phaseStateUncertain", monitor.phaseStateUncertain);
+        monitor.instrumentation.put("computeReadyWorkloadMi", monitor.computeReadyWorkloadMi);
+        monitor.instrumentation.put("executingWorkloadMi", monitor.executingWorkloadMi);
+        monitor.instrumentation.put("waitingDispatchWorkloadMi", monitor.waitingDispatchWorkloadMi);
+        monitor.instrumentation.put("networkRemainingBits", monitor.networkRemainingBits);
+        monitor.instrumentation.put("contactApplicabilityKnown", monitor.contactApplicabilityKnown);
+        monitor.instrumentation.put("contactEvidenceRequired", monitor.contactEvidenceRequired);
+        monitor.instrumentation.put("contactEvidenceStatus", monitor.contactEvidenceStatus);
+        monitor.instrumentation.put("deadlineEvidenceStatus", monitor.deadlineEvidenceStatus);
+        monitor.instrumentation.put("uncertaintyEvidenceStatus", monitor.uncertaintyEvidenceStatus);
         if (!monitor.instrumentation.containsKey("contactSlackAvailable")) {
             monitor.instrumentation.put("contactSlackAvailable", false);
         }
@@ -924,6 +941,151 @@ public class SatEdgeSimSession {
         }
         monitor.cachedState.put("predictionUncertaintySource", "unavailable_not_calibrated");
         return monitor.toMap();
+    }
+
+    /**
+     * Derives only native task/network phase aggregates.  It does not inspect
+     * candidate VMs or build planner state.  A compute certificate is emitted
+     * only when every compute-phase task has a created, working VM processor
+     * and the existing simulation update interval provides the explicit
+     * certificate horizon.
+     */
+    private void populatePhaseAwareWorkloadAndApplicability(
+            CheapMonitorState monitor, List<Task> tasks, double now) {
+        double computeReady = 0.0;
+        double executing = 0.0;
+        double waitingDispatch = 0.0;
+        double networkBits = 0.0;
+        boolean phaseUncertain = false;
+        boolean hadWork = false;
+        boolean remoteRequired = false;
+        boolean applicabilityKnown = true;
+        boolean certificateEligible = true;
+        Set<Long> computeVmIds = new HashSet<Long>();
+        Set<Long> activeNetworkTasks = new HashSet<Long>();
+        if (simulationManager != null && simulationManager.getNetworkModel() != null
+                && simulationManager.getNetworkModel().getTransferProgressList() != null) {
+            for (FileTransferProgress transfer : new ArrayList<FileTransferProgress>(
+                    simulationManager.getNetworkModel().getTransferProgressList())) {
+                if (transfer == null || transfer.getTask() == null
+                        || transfer.getRemainingFileSize() <= 0.0
+                        || transfer.getTask().getTime() > now + 1.0e-9
+                        || isTerminalTask(transfer.getTask())) {
+                    continue;
+                }
+                activeNetworkTasks.add(Long.valueOf(transfer.getTask().getId()));
+                networkBits += Math.max(0.0, transfer.getRemainingFileSize());
+            }
+        }
+        if (tasks != null) {
+            for (Task task : tasks) {
+                if (task == null || task.getTime() > now + 1.0e-9 || isTerminalTask(task)) continue;
+                hadWork = true;
+                long remaining = Math.max(0L, task.getLength() - task.getFinishedLengthSoFar());
+                DataCenter destination = task.getVm() == null || task.getVm().getHost() == null
+                        || !(task.getVm().getHost().getDatacenter() instanceof DataCenter)
+                        ? null : (DataCenter) task.getVm().getHost().getDatacenter();
+                if (destination == null) {
+                    applicabilityKnown = false;
+                    certificateEligible = false;
+                    waitingDispatch += remaining;
+                    continue;
+                }
+                if (task.getEdgeDevice() == null) {
+                    applicabilityKnown = false;
+                } else if (task.getEdgeDevice() != destination) {
+                    remoteRequired = true;
+                }
+                if (activeNetworkTasks.contains(Long.valueOf(task.getId()))) {
+                    continue;
+                }
+                String status = task.getStatus() == null ? "" : task.getStatus().name();
+                if ("INEXEC".equals(status)) {
+                    executing += remaining;
+                    if (!task.getVm().isCreated() || !task.getVm().isWorking()
+                            || task.getVm().getProcessor() == null
+                            || task.getVm().getProcessor().getMips() <= 0.0) {
+                        certificateEligible = false;
+                    } else {
+                        computeVmIds.add(Long.valueOf(task.getVm().getId()));
+                    }
+                } else if ("READY".equals(status) || "QUEUED".equals(status) || "PAUSED".equals(status)) {
+                    computeReady += remaining;
+                    if (!task.getVm().isCreated() || !task.getVm().isWorking()
+                            || task.getVm().getProcessor() == null
+                            || task.getVm().getProcessor().getMips() <= 0.0) {
+                        certificateEligible = false;
+                    } else {
+                        computeVmIds.add(Long.valueOf(task.getVm().getId()));
+                    }
+                } else {
+                    phaseUncertain = true;
+                    certificateEligible = false;
+                    waitingDispatch += remaining;
+                }
+            }
+        }
+        monitor.computeReadyWorkloadMi = computeReady;
+        monitor.executingWorkloadMi = executing;
+        monitor.waitingDispatchWorkloadMi = waitingDispatch;
+        monitor.networkRemainingBits = networkBits;
+        monitor.phaseStateUncertain = phaseUncertain;
+
+        boolean computeApplicable = computeReady + executing + waitingDispatch > 0.0;
+        monitor.serviceEvidenceApplicable = computeApplicable;
+        monitor.serviceEvidenceStatus = computeApplicable ? "UNAVAILABLE" : "NOT_APPLICABLE";
+        monitor.serviceHorizonSec = null;
+        monitor.serviceHorizonSource = "unavailable_at_cheap_monitor_cost";
+        monitor.serviceRateLowerBound = null;
+        monitor.serviceBoundCertified = false;
+        if (computeApplicable && certificateEligible && computeVmIds.size() > 0
+                && simulationParameters.UPDATE_INTERVAL > 0.0) {
+            double guaranteedMips = 0.0;
+            boolean capacityAvailable = true;
+            for (Long vmId : computeVmIds) {
+                Vm selected = null;
+                if (tasks != null) {
+                    for (Task task : tasks) {
+                        if (task != null && task.getVm() != null && task.getVm().getId() == vmId.longValue()) {
+                            selected = task.getVm();
+                            break;
+                        }
+                    }
+                }
+                if (selected == null || selected.getProcessor() == null
+                        || selected.getProcessor().getMips() <= 0.0) {
+                    capacityAvailable = false;
+                    break;
+                }
+                guaranteedMips += selected.getProcessor().getMips();
+            }
+            if (capacityAvailable && guaranteedMips > 0.0) {
+                monitor.serviceRateLowerBound = guaranteedMips;
+                monitor.serviceBoundCertified = true;
+                monitor.serviceHorizonSec = simulationParameters.UPDATE_INTERVAL;
+                monitor.serviceHorizonSource = "simulation_update_interval";
+                monitor.serviceRateSource = "cloudsim_vm_processor_mips_assigned_compute_phases";
+                monitor.serviceBoundSemantics = "conservative_assigned_vm_processor_capacity_over_update_interval";
+                monitor.serviceEvidenceStatus = "AVAILABLE";
+            }
+        }
+
+        monitor.contactApplicabilityKnown = !hadWork || applicabilityKnown;
+        monitor.contactEvidenceRequired = remoteRequired;
+        if (!hadWork || (monitor.contactApplicabilityKnown && !remoteRequired)) {
+            monitor.contactEvidenceStatus = "NOT_APPLICABLE";
+        } else if (!monitor.contactApplicabilityKnown) {
+            monitor.contactEvidenceStatus = "UNAVAILABLE";
+        } else {
+            monitor.contactEvidenceStatus = monitor.contactSlack.isEmpty() ? "UNAVAILABLE" : "AVAILABLE";
+        }
+        monitor.deadlineEvidenceApplicable = hadWork;
+        monitor.deadlineEvidenceAvailable = !monitor.deadlineSlack.isEmpty();
+        monitor.deadlineEvidenceStatus = !hadWork ? "NOT_APPLICABLE"
+                : (monitor.deadlineEvidenceAvailable ? "AVAILABLE" : "UNAVAILABLE");
+        monitor.uncertaintyEvidenceApplicable = hadWork;
+        monitor.uncertaintyEvidenceAvailable = false;
+        monitor.uncertaintyEvidenceStatus = hadWork ? "UNAVAILABLE" : "NOT_APPLICABLE";
     }
 
     /**
@@ -1076,6 +1238,10 @@ public class SatEdgeSimSession {
         double unfinishedTaskCount = 0.0;
         double totalRemainingWorkload = 0.0;
         double futureTaskCount = 0.0;
+        double waitingDispatchWorkload = 0.0;
+        double computeReadyWorkload = 0.0;
+        double executingWorkload = 0.0;
+        boolean phaseUncertain = false;
         if (tasks != null) {
             for (Task task : tasks) {
                 if (task == null) continue;
@@ -1088,6 +1254,18 @@ public class SatEdgeSimSession {
                 unfinishedTaskCount += 1.0;
                 long remaining = Math.max(0L, task.getLength() - task.getFinishedLengthSoFar());
                 totalRemainingWorkload += remaining;
+                if (task.getVm() == null || task.getVm() == Vm.NULL) {
+                    waitingDispatchWorkload += remaining;
+                } else {
+                    String status = task.getStatus() == null ? "" : task.getStatus().name();
+                    if ("INEXEC".equals(status)) executingWorkload += remaining;
+                    else if ("READY".equals(status) || "QUEUED".equals(status) || "PAUSED".equals(status)) {
+                        computeReadyWorkload += remaining;
+                    } else {
+                        phaseUncertain = true;
+                        waitingDispatchWorkload += remaining;
+                    }
+                }
                 String source = task.getEdgeDevice() == null
                         ? "unknown" : String.valueOf(task.getEdgeDevice().getDeviceID());
                 String sourceKey = "source:" + source;
@@ -1101,6 +1279,11 @@ public class SatEdgeSimSession {
         monitor.queueSummary.put("arrivedTaskCount", arrivedTaskCount);
         monitor.queueSummary.put("unfinishedTaskCount", unfinishedTaskCount);
         monitor.remainingWorkload.put("total", totalRemainingWorkload);
+        monitor.computeReadyWorkloadMi = computeReadyWorkload;
+        monitor.executingWorkloadMi = executingWorkload;
+        monitor.waitingDispatchWorkloadMi = waitingDispatchWorkload;
+        monitor.networkRemainingBits = 0.0;
+        monitor.phaseStateUncertain = phaseUncertain;
         monitor.instrumentation.put("futureTaskCountExcluded", futureTaskCount);
         monitor.instrumentation.put("remainingWorkloadSource", "arrived_unfinished_cloudlets");
         monitor.instrumentation.put("deadlineSlackSource", "Task.maxLatency_minus_current_time");

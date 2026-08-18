@@ -121,6 +121,27 @@ public class RlDecisionBridge {
                 lastPersistentDispatch.put("reason", "persistent_rule_target_unavailable");
                 return -1;
             }
+            RlAction persistentAction = persistentActionFromRule(rule, task, selected, vmList.get(selected));
+            RlResourceBindingMode bindingMode = persistentBindingMode(rule);
+            RlResourceProfile resourceProfile = RlResourceProfile.fromAction(persistentAction, bindingMode);
+            RlNativeResourceBindingManager.BindingSnapshot nativeBinding = RlNativeResourceBindingManager.BindingSnapshot.notRequested();
+            if (resourceProfile.nativeSchedulerBound()) {
+                double simulationTime = simulationManager == null || simulationManager.getSimulation() == null
+                        ? 0.0 : simulationManager.getSimulation().clock();
+                try {
+                    nativeBinding = RlNativeResourceBindingManager.bindTask(
+                            task, vmList.get(selected), selected, resourceProfile, simulationTime);
+                } catch (RuntimeException error) {
+                    lastPersistentDispatch = persistentDispatchFailure(
+                            task, selected, "persistent_native_binding_failed:" + error.getClass().getSimpleName());
+                    return -1;
+                }
+                if (nativeBinding == null || !nativeBinding.nativeBindingApplied) {
+                    lastPersistentDispatch = persistentDispatchFailure(
+                            task, selected, "persistent_native_binding_not_applied");
+                    return -1;
+                }
+            }
             persistentDispatchCount += 1L;
             lastPersistentDispatch = new LinkedHashMap<String, Object>();
             lastPersistentDispatch.put("accepted", true);
@@ -130,8 +151,114 @@ public class RlDecisionBridge {
             lastPersistentDispatch.put("selectedVmIndex", selected);
             lastPersistentDispatch.put("selectedVmId", vmList.get(selected).getId());
             lastPersistentDispatch.put("dispatchSource", "persistent_execution_rule");
+            lastPersistentDispatch.put("bindingMode", resourceProfile.bindingMode.toString());
+            lastPersistentDispatch.put("nativeBindingRequested", resourceProfile.nativeSchedulerBound());
+            lastPersistentDispatch.put("nativeBindingApplied", nativeBinding.nativeBindingApplied);
+            lastPersistentDispatch.put("resourceProfile", resourceProfile.toMap());
+            lastPersistentDispatch.put("nativeBinding", nativeBinding.requested ? nativeBinding.toMap() : null);
+            long persistentDecisionId = nextDecisionId();
+            ExecutionReceipt schedulingReceipt = persistentSchedulingReceipt(
+                    persistentDecisionId, task, selected, vmList.get(selected), resourceProfile, nativeBinding, simulationManager);
+            lastPersistentDispatch.put("executionReceipt", schedulingReceipt.toMap());
+            lastExecutionReceipt = schedulingReceipt;
+            cacheReceipt(schedulingReceipt);
+            lastDecision = schedulingReceipt.toMap();
+            RlDecisionResult decisionResult = new RlDecisionResult();
+            decisionResult.taskId = task.getId();
+            decisionResult.vmIndex = selected;
+            decisionResult.resourceProfile = resourceProfile;
+            decisionResult.nativeBinding = nativeBinding;
+            decisionResult.schedulingReceipt = schedulingReceipt;
+            decisionResult.decisionTimestamp = schedulingReceipt.simulationTime;
+            decisionResultByTaskId.put(Long.valueOf(task.getId()), decisionResult);
             return selected;
         }
+    }
+
+    private static Map<String, Object> persistentDispatchFailure(Task task, int selected, String reason) {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("accepted", false);
+        result.put("taskId", task == null ? -1L : task.getId());
+        result.put("selectedVmIndex", selected);
+        result.put("nativeBindingRequested", true);
+        result.put("nativeBindingApplied", false);
+        result.put("reason", reason);
+        return result;
+    }
+
+    private static RlAction persistentActionFromRule(Map<?, ?> rule, Task task, int selected, Vm vm) {
+        RlAction action = new RlAction();
+        action.taskId = task == null ? -1L : task.getId();
+        action.targetVmIndex = selected;
+        action.targetVmId = vm == null ? -1L : vm.getId();
+        action.selectedVmId = action.targetVmId;
+        action.cpuShare = numberDouble(rule.get("cpuShare"), numberDouble(rule.get("cpu_share"), 1.0));
+        action.bandwidthShare = numberDouble(rule.get("bandwidthShare"), numberDouble(rule.get("bandwidth_share"), 1.0));
+        action.txPowerRatio = numberDouble(rule.get("txPowerRatio"), numberDouble(rule.get("tx_power_ratio"), 1.0));
+        Object mode = rule.get("bindingMode");
+        if (mode == null) mode = rule.get("continuous_resource_binding_mode");
+        if (mode == null) mode = rule.get("continuousResourceBindingMode");
+        if (mode != null) action.extra.put("bindingMode", String.valueOf(mode));
+        action.policyUpperActionName = "persistent_rule";
+        action.abstractActionName = "persistent_rule";
+        return action;
+    }
+
+    private static RlResourceBindingMode persistentBindingMode(Map<?, ?> rule) {
+        Object raw = rule.get("bindingMode");
+        if (raw == null) raw = rule.get("continuous_resource_binding_mode");
+        if (raw == null) raw = rule.get("continuousResourceBindingMode");
+        if (raw == null) return RlResourceBindingMode.candidate_only;
+        String value = String.valueOf(raw).trim().toLowerCase();
+        if ("native_scheduler_bound".equals(value)) return RlResourceBindingMode.native_scheduler_bound;
+        if ("resource_aware_estimator_bound".equals(value)) return RlResourceBindingMode.resource_aware_estimator_bound;
+        return RlResourceBindingMode.candidate_only;
+    }
+
+    private static double numberDouble(Object value, double fallback) {
+        return value instanceof Number ? ((Number) value).doubleValue() : fallback;
+    }
+
+    private static ExecutionReceipt persistentSchedulingReceipt(
+            long decisionId, Task task, int selected, Vm vm, RlResourceProfile profile,
+            RlNativeResourceBindingManager.BindingSnapshot nativeBinding,
+            SimulationManager simulationManager) {
+        ExecutionReceipt receipt = new ExecutionReceipt();
+        receipt.receiptStage = "scheduling";
+        receipt.accepted = true;
+        receipt.actionAccepted = true;
+        receipt.executionScheduled = true;
+        receipt.taskCompleted = null;
+        receipt.taskSucceeded = null;
+        receipt.decisionId = decisionId;
+        receipt.taskId = task == null ? -1L : task.getId();
+        receipt.simulationTime = simulationManager == null || simulationManager.getSimulation() == null
+                ? 0.0 : simulationManager.getSimulation().clock();
+        receipt.selectedVmIndex = selected;
+        receipt.selectedVmId = vm == null ? -1L : vm.getId();
+        receipt.executedVmIndex = selected;
+        receipt.executedVmId = receipt.selectedVmId;
+        receipt.resourceProfile = profile;
+        receipt.continuousResourceBindingMode = profile.bindingMode.toString();
+        receipt.continuousResourceApplied = profile.continuousApplied;
+        receipt.nativeSchedulerBound = profile.nativeSchedulerBound();
+        receipt.estimatorBound = profile.estimatorBound();
+        receipt.nativeBindingApplied = nativeBinding != null && nativeBinding.nativeBindingApplied;
+        receipt.nativeCpuMipsBound = receipt.nativeBindingApplied;
+        receipt.nativeNetworkBandwidthBound = receipt.nativeBindingApplied;
+        receipt.nativeTxPowerBound = receipt.nativeBindingApplied;
+        receipt.nativeBinding = nativeBinding != null && nativeBinding.requested ? nativeBinding.toMap() : null;
+        if (nativeBinding != null && nativeBinding.requested) {
+            receipt.nativeBaseMips = nativeBinding.baseMips;
+            receipt.nativeAppliedMips = nativeBinding.appliedMips;
+            receipt.nativeCpuShare = nativeBinding.cpuShare;
+            receipt.nativeBandwidthShare = nativeBinding.bandwidthShare;
+            receipt.nativeTxPowerRatio = nativeBinding.txPowerRatio;
+        }
+        receipt.failureReason = "pending_task_completion";
+        receipt.success = null;
+        receipt.message = "persistent reusable rule selected and scheduled";
+        return receipt;
     }
 
     public int requestDecision(

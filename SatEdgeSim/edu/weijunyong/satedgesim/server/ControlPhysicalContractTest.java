@@ -14,6 +14,8 @@ public class ControlPhysicalContractTest {
         require(Boolean.TRUE.equals(capabilities.get("supportsCheapMonitor")), "cheap monitor capability");
         require(Boolean.TRUE.equals(capabilities.get("supportsScopedPlannerState")), "scoped planner capability");
         require(Boolean.FALSE.equals(capabilities.get("futureStochasticTruthExposed")), "future truth must be hidden");
+        require(Boolean.TRUE.equals(capabilities.get("supportsPersistentNativeResourceActuation")), "persistent native binding capability");
+        require(Boolean.FALSE.equals(capabilities.get("supportsPersistentRouteActuation")), "persistent route actuation must remain unsupported");
 
         PersistentExecutionConfiguration configuration = new PersistentExecutionConfiguration();
         configuration.configId = "cfg";
@@ -59,6 +61,11 @@ public class ControlPhysicalContractTest {
         require(value(aggregated.remainingWorkload, "total") == 75.0, "remaining workload uses unfinished length");
         require(value(aggregated.deadlineSlack, "1") == 7.0, "deadline slack uses current time");
         require(value(aggregated.instrumentation, "futureTaskCountExcluded") == 1.0, "future task exclusion is instrumented");
+        require(aggregated.waitingDispatchWorkloadMi != null && aggregated.waitingDispatchWorkloadMi == 75.0,
+                "unassigned workload is waiting dispatch");
+        require(aggregated.computeReadyWorkloadMi != null && aggregated.computeReadyWorkloadMi == 0.0,
+                "unassigned workload is not compute-ready");
+        require(Boolean.FALSE.equals(aggregated.phaseStateUncertain), "native task phase must be known for unassigned task");
         System.out.println("ControlPhysicalContractTest OK");
     }
 

@@ -26,6 +26,8 @@ public final class ControlPhysicalContract {
         result.put("supportsTopologySnapshot", true);
         result.put("supportsConfigurationApply", true);
         result.put("supportsPersistentConfigurationExecution", true);
+        result.put("supportsPersistentNativeResourceActuation", true);
+        result.put("supportsPersistentRouteActuation", false);
         result.put("supportsConfigurationDispatch", true);
         result.put("supportsPhysicalDecisionDelay", true);
         result.put("supportsAdvanceWorld", true);
@@ -40,6 +42,7 @@ public final class ControlPhysicalContract {
         result.put("scopeDimensions", Arrays.asList("task_ids", "source_ids", "node_ids", "link_ids", "route_ids", "resource_keys"));
         result.put("budgetDimensions", Arrays.asList("max_candidate_count", "max_planner_evaluations", "max_coordination_bytes", "max_compute_budget", "time_budget_ms"));
         result.put("persistentRuleDimensions", Arrays.asList("source", "application", "traffic", "flow", "default", "node", "route", "resource", "task_override"));
+        result.put("persistentConfigurationBindingDimensions", Arrays.asList("target_vm", "cpuShare", "bandwidthShare", "txPowerRatio"));
         result.put("instrumentation", instrumentation == null ? new LinkedHashMap<String, Object>() : instrumentation);
         return result;
     }
