@@ -428,6 +428,15 @@ public class SimulationManager extends CloudSimEntity {
 		task.setTaskFinishTime(task.getSimulation().clock()); //设置完成时间
 	}
 
+	/** Record a native network failure and emit the normal completion receipt. */
+	public void failTaskDueToContact(Task task) {
+		if (task == null) return;
+		failedTasksCount++;
+		tasksCount++;
+		if (edgeOrchestrator != null) edgeOrchestrator.resultsReturned(task);
+		if (task.getSimulation() != null) task.setTaskFinishTime(task.getSimulation().clock());
+	}
+
 	private boolean sameLocation(DataCenter Dev1, DataCenter Dev2) {
 		double range = LinkAvailability.maxRangeMeters(Dev2.getType());
 		double distance = getdistance(Dev1, Dev2);

@@ -302,6 +302,28 @@ public class SatEdgeSimRestServer {
                 return ok(session.advanceWorld(((Number) raw).doubleValue()));
             }
         });
+        server.createContext("/control/epoch/advance", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                Map<String, Object> request = body.trim().isEmpty()
+                        ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                Object raw = request.get("deltaSec");
+                if (!(raw instanceof Number)) {
+                    throw new IllegalArgumentException("control epoch advance requires numeric deltaSec");
+                }
+                return ok(session.advanceControlEpoch(((Number) raw).doubleValue()));
+            }
+        });
+        server.createContext("/control/epoch/resume", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                return ok(session.resumeControlEpoch());
+            }
+        });
         int threads = Math.max(8, Runtime.getRuntime().availableProcessors() * 2);
         server.setExecutor((ThreadPoolExecutor) Executors.newFixedThreadPool(threads));
         server.start();

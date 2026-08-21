@@ -720,6 +720,12 @@ public class RlDecisionBridge {
             receipt.energySourceAvailable = finalEnergyWh != null;
             receipt.energyUnavailableReason = finalEnergyWh == null ? energyUnavailableReason(simulationManager) : "none";
             receipt.failureReason = receipt.taskSucceeded ? "none" : (task == null || task.getFailureReason() == null ? "unknown_failure" : task.getFailureReason().toString());
+            receipt.contactInterrupted = task != null && task.isContactInterrupted();
+            receipt.contactInterruptionTime = receipt.contactInterrupted
+                    ? Double.valueOf(task.getContactInterruptionTime()) : null;
+            receipt.remainingBytes = receipt.contactInterrupted
+                    ? Double.valueOf(task.getContactRemainingBytes()) : null;
+            receipt.contactFailureReason = task == null ? "none" : task.getContactFailureReason();
             receipt.completionTimestamp = simClock;
             receipt.simulationTime = simClock;
             receipt.bindingMode = decision == null || decision.resourceProfile == null

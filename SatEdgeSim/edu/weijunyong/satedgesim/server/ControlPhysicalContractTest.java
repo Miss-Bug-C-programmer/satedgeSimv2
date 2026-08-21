@@ -16,6 +16,9 @@ public class ControlPhysicalContractTest {
         require(Boolean.FALSE.equals(capabilities.get("futureStochasticTruthExposed")), "future truth must be hidden");
         require(Boolean.TRUE.equals(capabilities.get("supportsPersistentNativeResourceActuation")), "persistent native binding capability");
         require(Boolean.FALSE.equals(capabilities.get("supportsPersistentRouteActuation")), "persistent route actuation must remain unsupported");
+        require(Boolean.TRUE.equals(capabilities.get("supportsControlMonitoringEpoch")), "control monitoring epoch capability");
+        require(Boolean.TRUE.equals(capabilities.get("supportsControlEpochResume")), "control epoch resume capability");
+        require("cloudsim_pause_at_control_epoch_v1".equals(capabilities.get("physicalDecisionDelaySemanticsVersion")), "control epoch delay semantics");
 
         PersistentExecutionConfiguration configuration = new PersistentExecutionConfiguration();
         configuration.configId = "cfg";
@@ -24,12 +27,16 @@ public class ControlPhysicalContractTest {
         rule.put("selector", new LinkedHashMap<String, Object>() {{ put("source_id", "s1"); }});
         rule.put("assignment", new LinkedHashMap<String, Object>() {{ put("targetVmId", 7L); }});
         configuration.reusableRules.put("source-s1", rule);
+        configuration.assignments.put("s1", new LinkedHashMap<String, Object>() {{ put("targetVmId", 8L); }});
         Map<String, Object> task = new LinkedHashMap<String, Object>();
         task.put("taskId", 42L);
         task.put("sourceId", "s1");
         Object materialized = configuration.materialize(task);
         require(materialized instanceof Map, "reusable rule must materialize");
-        require("7".equals(String.valueOf(((Map<?, ?>) materialized).get("targetVmId"))), "target binding");
+        require("8".equals(String.valueOf(((Map<?, ?>) materialized).get("targetVmId"))), "source assignment must materialize before reusable rule");
+        configuration.assignments.remove("s1");
+        materialized = configuration.materialize(task);
+        require("7".equals(String.valueOf(((Map<?, ?>) materialized).get("targetVmId"))), "reusable rule target binding");
 
         CheapMonitorState monitor = new CheapMonitorState();
         monitor.instrumentation.put("candidateEvaluations", 0L);

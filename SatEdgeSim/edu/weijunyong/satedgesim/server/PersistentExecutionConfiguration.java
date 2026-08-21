@@ -57,6 +57,16 @@ public final class PersistentExecutionConfiguration {
         if (taskId != null && assignments.containsKey(taskId)) {
             return assignments.get(taskId);
         }
+        // Planner-produced persistent assignments are commonly keyed by the
+        // source/device entity rather than by a future task id.  Resolve this
+        // only from current task metadata; it does not enumerate future work.
+        String sourceId = taskValue(task, "sourceId", "source_id");
+        if (sourceId != null && assignments.containsKey(sourceId)) {
+            return assignments.get(sourceId);
+        }
+        if (sourceId != null && assignments.containsKey("source:" + sourceId)) {
+            return assignments.get("source:" + sourceId);
+        }
         Object best = null;
         int bestScore = -1;
         for (Map.Entry<String, Object> entry : reusableRules.entrySet()) {

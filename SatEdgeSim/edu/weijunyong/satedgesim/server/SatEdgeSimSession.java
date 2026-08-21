@@ -58,6 +58,7 @@ public class SatEdgeSimSession {
     private PersistentExecutionConfiguration currentConfiguration;
     private double configurationAppliedAtSec = Double.NaN;
     private long configurationReceiptSequence = 0L;
+    private boolean controlEpochPausedForActivation = false;
 
     private Class<? extends Mobility> mobilityManager = DefaultMobilityModel.class;
     private Class<? extends DataCenter> edgeDatacenter = DefaultDataCenter.class;
@@ -626,26 +627,94 @@ public class SatEdgeSimSession {
 
     /** Advance CloudSim through its public pause-at/resume mechanism. */
     public synchronized Map<String, Object> advanceWorld(double deltaSec) {
+        return advanceWorldInternal(deltaSec, false);
+    }
+
+    /**
+     * Advance a control-plane decision epoch while the active persistent
+     * configuration remains responsible for task decisions.  The simulation
+     * is left paused at the target so validation and configuration activation
+     * happen before the next task-level request can block the simulation.
+     */
+    public synchronized Map<String, Object> advanceControlEpoch(double deltaSec) {
+        if (currentConfiguration == null) {
+            Map<String, Object> rejected = new LinkedHashMap<String, Object>();
+            rejected.put("accepted", false);
+            rejected.put("reason", "no_active_persistent_configuration");
+            rejected.put("physicalClockAdvanced", false);
+            rejected.put("controlEpoch", true);
+            rejected.put("controlEpochCompleted", false);
+            rejected.put("controlEpochBlocked", true);
+            rejected.put("pausedForConfigurationActivation", false);
+            return rejected;
+        }
+        return advanceWorldInternal(deltaSec, true);
+    }
+
+    private synchronized Map<String, Object> advanceWorldInternal(double deltaSec, boolean controlEpoch) {
         if (simulation == null) throw new IllegalStateException("simulation is not ready");
         if (Double.isNaN(deltaSec) || Double.isInfinite(deltaSec) || deltaSec <= 0.0) {
             throw new IllegalArgumentException("deltaSec must be finite and positive");
         }
         Map<String, Object> scalars = bridge.getCurrentDecisionScalars();
         if (numberAsLong(scalars.get("taskId"), -1L) >= 0L) {
-            Map<String, Object> rejected = new LinkedHashMap<String, Object>();
-            rejected.put("accepted", false);
-            rejected.put("reason", "simulation_waiting_for_decision");
-            rejected.put("simulationTimeSec", simulation.clock());
-            rejected.put("requestedDeltaSec", deltaSec);
-            rejected.put("physicalClockAdvanced", false);
-            rejected.put("directClockMutation", false);
-            return rejected;
+            if (!controlEpoch) {
+                Map<String, Object> rejected = new LinkedHashMap<String, Object>();
+                rejected.put("accepted", false);
+                rejected.put("reason", "simulation_waiting_for_decision");
+                rejected.put("simulationTimeSec", simulation.clock());
+                rejected.put("requestedDeltaSec", deltaSec);
+                rejected.put("physicalClockAdvanced", false);
+                rejected.put("directClockMutation", false);
+                return rejected;
+            }
+            Map<String, Object> dispatchRequest = new LinkedHashMap<String, Object>();
+            dispatchRequest.put("configuration", currentConfiguration.toMap());
+            Map<String, Object> task = new LinkedHashMap<String, Object>();
+            task.put("taskId", scalars.get("taskId"));
+            task.put("sourceId", scalars.get("sourceDeviceId"));
+            dispatchRequest.put("task", task);
+            Map<String, Object> dispatch = dispatchUnderConfiguration(dispatchRequest);
+            if (!Boolean.TRUE.equals(dispatch.get("accepted"))) {
+                Map<String, Object> rejected = new LinkedHashMap<String, Object>();
+                rejected.put("accepted", false);
+                rejected.put("reason", "persistent_configuration_cannot_resolve_pending_task");
+                rejected.put("detail", dispatch.get("reason"));
+                rejected.put("persistentDispatch", dispatch);
+                rejected.put("simulationTimeSec", simulation.clock());
+                rejected.put("requestedDeltaSec", deltaSec);
+                rejected.put("physicalClockAdvanced", false);
+                rejected.put("physicalStateChanged", false);
+                rejected.put("directClockMutation", false);
+                rejected.put("advanceMechanism", "CloudSim.pauseAt");
+                rejected.put("controlEpoch", true);
+                rejected.put("controlEpochCompleted", false);
+                rejected.put("controlEpochBlocked", true);
+                rejected.put("status", "CONTROL_EPOCH_BLOCKED_ON_TASK_DECISION");
+                rejected.put("oldConfigurationActiveDuringDelay",
+                        currentConfiguration == null ? null : currentConfiguration.configId);
+                rejected.put("newConfigurationAppliedAfterDelay", false);
+                rejected.put("pausedForConfigurationActivation", false);
+                rejected.put("blockingDecisionId", scalars.get("decisionId"));
+                rejected.put("blockingTaskId", scalars.get("taskId"));
+                rejected.put("blockingSourceDeviceId", scalars.get("sourceDeviceId"));
+                rejected.put("pauseTargetCancelled", false);
+                return rejected;
+            }
         }
         double before = simulation.clock();
         double target = before + deltaSec;
         boolean scheduled = simulation.pause(target);
+        boolean blockedByUnmaterializedTask = false;
         long deadline = System.currentTimeMillis() + 30000L;
         while (scheduled && !simulation.isPaused() && !bridge.isFinished() && System.currentTimeMillis() < deadline) {
+            if (controlEpoch) {
+                Map<String, Object> pending = bridge.getCurrentDecisionScalars();
+                if (numberAsLong(pending.get("taskId"), -1L) >= 0L) {
+                    blockedByUnmaterializedTask = true;
+                    break;
+                }
+            }
             try {
                 Thread.sleep(10L);
             } catch (InterruptedException error) {
@@ -662,9 +731,44 @@ public class SatEdgeSimSession {
                 }
             }
         }
+        if (controlEpoch && blockedByUnmaterializedTask) {
+            Map<String, Object> pending = bridge.getCurrentDecisionScalars();
+            cancelScheduledPause();
+            Map<String, Object> blocked = new LinkedHashMap<String, Object>();
+            blocked.put("accepted", false);
+            blocked.put("status", "CONTROL_EPOCH_BLOCKED_ON_TASK_DECISION");
+            blocked.put("reason", "persistent_configuration_cannot_resolve_task_during_control_epoch");
+            blocked.put("detail", "old persistent configuration did not resolve a newly pending task");
+            blocked.put("requestedDeltaSec", deltaSec);
+            blocked.put("simulationTimeBeforeSec", before);
+            blocked.put("simulationTimeSec", after);
+            blocked.put("targetSimulationTimeSec", target);
+            blocked.put("physicalClockAdvanced", after > before);
+            blocked.put("physicalStateChanged", after > before);
+            blocked.put("directClockMutation", false);
+            blocked.put("advanceMechanism", "CloudSim.pauseAt");
+            blocked.put("controlEpoch", true);
+            blocked.put("controlEpochCompleted", false);
+            blocked.put("controlEpochBlocked", true);
+            blocked.put("pausedForConfigurationActivation", false);
+            blocked.put("oldConfigurationActiveDuringDelay", currentConfiguration == null ? null : currentConfiguration.configId);
+            blocked.put("newConfigurationAppliedAfterDelay", false);
+            blocked.put("blockingDecisionId", pending.get("decisionId"));
+            blocked.put("blockingTaskId", pending.get("taskId"));
+            blocked.put("blockingSourceDeviceId", pending.get("sourceDeviceId"));
+            blocked.put("persistentDispatch", bridge.getDecisionPlaneStats().get("lastPersistentDispatch"));
+            blocked.put("uncoveredTaskCountDuringDelta", uncoveredTaskIds.size());
+            blocked.put("uncoveredTaskIdsDuringDelta", uncoveredTaskIds);
+            blocked.put("pauseTargetCancelled", true);
+            blocked.put("containsFutureStochasticState", false);
+            return blocked;
+        }
         Map<String, Object> result = new LinkedHashMap<String, Object>();
+        boolean pausedForActivation = controlEpoch && scheduled && after > before && simulation.isPaused();
         result.put("accepted", scheduled && after > before);
-        result.put("status", simulation.isPaused() ? "ADVANCED_AND_RESUMED" : "ADVANCE_TIMEOUT");
+        result.put("status", pausedForActivation
+                ? "ADVANCED_AND_PAUSED_FOR_CONFIGURATION"
+                : (simulation.isPaused() ? "ADVANCED_AND_RESUMED" : "ADVANCE_TIMEOUT"));
         result.put("requestedDeltaSec", deltaSec);
         result.put("simulationTimeBeforeSec", before);
         result.put("simulationTimeSec", after);
@@ -673,16 +777,51 @@ public class SatEdgeSimSession {
         result.put("physicalStateChanged", after > before);
         result.put("directClockMutation", false);
         result.put("advanceMechanism", "CloudSim.pauseAt");
-        result.put("resumeAfterReceipt", simulation.isPaused());
+        result.put("controlEpoch", controlEpoch);
+        result.put("resumeAfterReceipt", !controlEpoch && simulation.isPaused());
         result.put("oldConfigurationActiveDuringDelay", currentConfiguration == null ? null : currentConfiguration.configId);
         result.put("newConfigurationAppliedAfterDelay", false);
+        result.put("pausedForConfigurationActivation", pausedForActivation);
+        result.put("controlEpochCompleted", controlEpoch && scheduled && after > before && simulation.isPaused());
         result.put("uncoveredTaskCountDuringDelta", uncoveredTaskIds.size());
         result.put("uncoveredTaskIdsDuringDelta", uncoveredTaskIds);
         result.put("containsFutureStochasticState", false);
         result.put("validationRequiredBeforeConfigurationActivation", true);
-        if (simulation.isPaused()) {
+        if (pausedForActivation) {
+            controlEpochPausedForActivation = true;
+        } else if (simulation.isPaused()) {
             simulation.resume();
         }
+        return result;
+    }
+
+    /** Cancel the pause-at target without mutating the CloudSim clock. */
+    private void cancelScheduledPause() {
+        if (simulation == null || simulation.isPaused()) return;
+        simulation.pause(simulation.clock());
+        simulation.resume();
+    }
+
+    public synchronized Map<String, Object> resumeControlEpoch() {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("receiptType", "control_epoch_resume");
+        result.put("controlEpoch", true);
+        result.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        result.put("oldConfigurationActiveDuringDelay", currentConfiguration == null ? null : currentConfiguration.configId);
+        if (!controlEpochPausedForActivation) {
+            result.put("accepted", false);
+            result.put("reason", "no_paused_control_epoch");
+            result.put("physicalClockAdvanced", false);
+            return result;
+        }
+        boolean wasPaused = simulation != null && simulation.isPaused();
+        if (wasPaused) simulation.resume();
+        controlEpochPausedForActivation = false;
+        result.put("accepted", wasPaused);
+        result.put("reason", wasPaused ? "old_configuration_resumed" : "simulation_not_paused");
+        result.put("resumed", wasPaused);
+        result.put("physicalClockAdvanced", false);
+        result.put("newConfigurationAppliedAfterDelay", false);
         return result;
     }
 
@@ -703,6 +842,11 @@ public class SatEdgeSimSession {
             configurationAppliedAtSec = simulation == null ? Double.NaN : simulation.clock();
         }
         bridge.setPersistentConfiguration(candidate);
+        boolean resumedAfterControlEpoch = controlEpochPausedForActivation && simulation != null && simulation.isPaused();
+        if (resumedAfterControlEpoch) {
+            simulation.resume();
+            controlEpochPausedForActivation = false;
+        }
         configurationReceiptSequence += 1L;
         receipt.put("receiptType", "configuration_apply");
         receipt.put("accepted", true);
@@ -716,6 +860,7 @@ public class SatEdgeSimSession {
         receipt.put("configuration", candidate.toMap());
         receipt.put("reusableRuleCount", candidate.reusableRules.size());
         receipt.put("dispatchMode", "persistent_reusable_rule");
+        receipt.put("resumedAfterControlEpoch", resumedAfterControlEpoch);
         receipt.put("containsFutureStochasticState", false);
         return receipt;
     }
@@ -738,6 +883,7 @@ public class SatEdgeSimSession {
                 : new LinkedHashMap<String, Object>((Map<String, Object>) request.get("task"));
         Map<String, Object> scalars = bridge.getCurrentDecisionScalars();
         if (!taskContext.containsKey("taskId")) taskContext.put("taskId", scalars.get("taskId"));
+        if (!taskContext.containsKey("sourceId")) taskContext.put("sourceId", scalars.get("sourceDeviceId"));
         Object rule = currentConfiguration.materialize(taskContext);
         receipt.put("task", taskContext);
         receipt.put("resolvedRule", rule);

@@ -21,6 +21,12 @@ public class FileTransferProgress {
 	private double txPowerRatioClamped = 1.0;
 	private boolean nativeNetworkBound = false;
 	private boolean nativeTxPowerBound = false;
+	private boolean contactRequired = false;
+	private boolean contactEvidenceAvailable = false;
+	private double contactEndSec = Double.NaN;
+	private boolean contactInterrupted = false;
+	private double contactInterruptionTime = Double.NaN;
+	private String contactFailureReason = "none";
 
 	public FileTransferProgress(Task task, double remainingFileSize, Type type) {
 		this.task = task;
@@ -127,6 +133,54 @@ public class FileTransferProgress {
 
 	public void setNativeTxPowerBound(boolean nativeTxPowerBound) {
 		this.nativeTxPowerBound = nativeTxPowerBound;
+	}
+
+	public boolean isContactRequired() {
+		return contactRequired;
+	}
+
+	public void setContactRequired(boolean contactRequired) {
+		this.contactRequired = contactRequired;
+	}
+
+	public boolean isContactEvidenceAvailable() {
+		return contactEvidenceAvailable;
+	}
+
+	public void setContactEvidenceAvailable(boolean contactEvidenceAvailable) {
+		this.contactEvidenceAvailable = contactEvidenceAvailable;
+	}
+
+	public double getContactEndSec() {
+		return contactEndSec;
+	}
+
+	public void setContactEndSec(double contactEndSec) {
+		this.contactEndSec = contactEndSec;
+	}
+
+	public boolean isContactInterrupted() {
+		return contactInterrupted;
+	}
+
+	public void setContactInterrupted(boolean contactInterrupted) {
+		this.contactInterrupted = contactInterrupted;
+	}
+
+	public double getContactInterruptionTime() {
+		return contactInterruptionTime;
+	}
+
+	public void setContactInterruptionTime(double contactInterruptionTime) {
+		this.contactInterruptionTime = contactInterruptionTime;
+	}
+
+	public String getContactFailureReason() {
+		return contactFailureReason;
+	}
+
+	public void setContactFailureReason(String contactFailureReason) {
+		this.contactFailureReason = contactFailureReason == null ? "none" : contactFailureReason;
 	}
 
 	private double clampShare(double value) {

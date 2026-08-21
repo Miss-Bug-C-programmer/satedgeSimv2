@@ -22,6 +22,10 @@ public class RlCompletionReceipt {
     public boolean energySourceAvailable = false;
     public String energyUnavailableReason = "energy_counter_not_read";
     public String failureReason = "none";
+    public boolean contactInterrupted = false;
+    public Double contactInterruptionTime = null;
+    public Double remainingBytes = null;
+    public String contactFailureReason = "none";
     public double completionTimestamp = 0.0;
     public RlResourceBindingMode bindingMode = RlResourceBindingMode.candidate_only;
     public boolean nativeBindingReleased = false;
@@ -49,6 +53,10 @@ public class RlCompletionReceipt {
         out.put("energyUnavailableReason", energyUnavailableReason);
         out.put("energy_unavailable_reason", energyUnavailableReason);
         out.put("failureReason", failureReason);
+        out.put("contactInterrupted", contactInterrupted);
+        out.put("contactInterruptionTime", contactInterruptionTime);
+        out.put("remainingBytes", remainingBytes);
+        out.put("contactFailureReason", contactFailureReason);
         out.put("completionTimestamp", completionTimestamp);
         out.put("bindingMode", bindingMode.toString());
         out.put("nativeBindingReleased", nativeBindingReleased);

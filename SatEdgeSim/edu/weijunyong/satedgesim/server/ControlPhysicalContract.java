@@ -31,13 +31,15 @@ public final class ControlPhysicalContract {
         result.put("supportsConfigurationDispatch", true);
         result.put("supportsPhysicalDecisionDelay", true);
         result.put("supportsAdvanceWorld", true);
+        result.put("supportsControlMonitoringEpoch", true);
+        result.put("supportsControlEpochResume", true);
         result.put("supportsConfigurationValidation", true);
         result.put("supportsMidTransferContactEnforcement", false);
         result.put("futureStochasticTruthExposed", false);
         result.put("topologySource", "TopologyOracle");
         result.put("monitorSource", "CheapMonitorState");
         result.put("plannerStateSource", "RlStateBuilder.pending_decision_cache");
-        result.put("physicalDecisionDelaySemanticsVersion", "cloudsim_pause_at_v1");
+        result.put("physicalDecisionDelaySemanticsVersion", "cloudsim_pause_at_control_epoch_v1");
         result.put("configurationSemanticsVersion", "v2-persistent-reusable-rules");
         result.put("scopeDimensions", Arrays.asList("task_ids", "source_ids", "node_ids", "link_ids", "route_ids", "resource_keys"));
         result.put("budgetDimensions", Arrays.asList("max_candidate_count", "max_planner_evaluations", "max_coordination_bytes", "max_compute_budget", "time_budget_ms"));

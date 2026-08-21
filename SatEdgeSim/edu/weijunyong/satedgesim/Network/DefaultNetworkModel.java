@@ -9,6 +9,8 @@ import edu.weijunyong.satedgesim.ScenarioManager.simulationParameters;
 import edu.weijunyong.satedgesim.SimulationManager.SimLog;
 import edu.weijunyong.satedgesim.SimulationManager.SimulationManager;
 import edu.weijunyong.satedgesim.TasksGenerator.Task;
+import edu.weijunyong.satedgesim.Topology.ContactForecast;
+import edu.weijunyong.satedgesim.Topology.TopologyOracle;
 import edu.weijunyong.satedgesim.server.RlNativeResourceBindingManager;
 
 public class DefaultNetworkModel extends NetworkModel {
@@ -57,6 +59,7 @@ public class DefaultNetworkModel extends NetworkModel {
 	private FileTransferProgress newTransfer(Task task, double remainingFileSize, FileTransferProgress.Type type) {
 		FileTransferProgress transfer = new FileTransferProgress(task, remainingFileSize, type);
 		RlNativeResourceBindingManager.attachToTransfer(transfer);
+		initializeContactState(transfer);
 		return transfer;
 	}
 
@@ -103,6 +106,11 @@ public class DefaultNetworkModel extends NetworkModel {
 			int remainingTransfersCount_Lan = 0;
 			int remainingTransfersCount_Wan = 0;
 			if (transferProgressList.get(i).getRemainingFileSize() > 0) {
+				if (contactClosed(transferProgressList.get(i))) {
+					failTransferForContact(transferProgressList.get(i));
+					i--;
+					continue;
+				}
 				for (int j = i; j < transferProgressList.size(); j++) {
 					if (transferProgressList.get(j).getRemainingFileSize() > 0 && j != i) {
 						if (wanIsUsed(transferProgressList.get(j))) {
@@ -125,6 +133,95 @@ public class DefaultNetworkModel extends NetworkModel {
 			}
 
 		}
+	}
+
+	private void initializeContactState(FileTransferProgress transfer) {
+		DataCenter source = transferSource(transfer);
+		DataCenter destination = transferDestination(transfer);
+		if (source == null || destination == null || source == destination) return;
+		transfer.setContactRequired(true);
+		if (simulationManager.getContactPlan() == null) return;
+		try {
+			ContactForecast forecast = simulationManager.getContactPlan().getContactForecast(
+					TopologyOracle.toRef(source), TopologyOracle.toRef(destination),
+					simulationManager.getSimulation().clock(),
+					simulationParameters.TOPOLOGY_FORECAST_HORIZON_SEC);
+			if (forecast.availableNow && forecast.currentContactEndSec != null
+					&& !forecast.remainingLifetimeCensored) {
+				transfer.setContactEvidenceAvailable(true);
+				transfer.setContactEndSec(forecast.currentContactEndSec.doubleValue());
+			}
+		} catch (RuntimeException unavailable) {
+			// A required contact without physical evidence is fail-closed below.
+		}
+	}
+
+	private boolean contactClosed(FileTransferProgress transfer) {
+		return ContactEnforcementPolicy.shouldInterrupt(transfer.isContactRequired(),
+				transfer.isContactEvidenceAvailable(), simulationManager.getSimulation().clock(),
+				transfer.getContactEndSec());
+	}
+
+	private void failTransferForContact(FileTransferProgress transfer) {
+		double now = simulationManager.getSimulation().clock();
+		String reason = ContactEnforcementPolicy.failureReason(transfer.isContactEvidenceAvailable());
+		transfer.setContactInterrupted(true);
+		transfer.setContactInterruptionTime(now);
+		transfer.setContactFailureReason(reason);
+		Task task = transfer.getTask();
+		if (task != null) {
+			task.setContactInterrupted(true);
+			task.setContactInterruptionTime(now);
+			task.setContactRemainingBytes(transfer.getRemainingFileSize());
+			task.setContactFailureReason(reason);
+			task.setFailureReason(Task.Status.FAILED_DUE_TO_CONTACT_INTERRUPTION);
+		}
+		transferProgressList.remove(transfer);
+		if (task != null) simulationManager.failTaskDueToContact(task);
+	}
+
+	private static DataCenter transferSource(FileTransferProgress transfer) {
+		Task task = transfer.getTask();
+		if (task == null) return null;
+		switch (transfer.getTransferType()) {
+		case REQUEST:
+			return task.getEdgeDevice();
+		case TASK:
+			return task.getOrchestrator();
+		case RESULTS_TO_ORCH:
+			return destinationDataCenter(task);
+		case RESULTS_TO_DEV:
+			return task.getOrchestrator();
+		case CONTAINER:
+			return task.getRegistry();
+		default:
+			return null;
+		}
+	}
+
+	private static DataCenter transferDestination(FileTransferProgress transfer) {
+		Task task = transfer.getTask();
+		if (task == null) return null;
+		switch (transfer.getTransferType()) {
+		case REQUEST:
+			return task.getOrchestrator();
+		case TASK:
+			return destinationDataCenter(task);
+		case RESULTS_TO_ORCH:
+			return task.getOrchestrator();
+		case RESULTS_TO_DEV:
+			return task.getEdgeDevice();
+		case CONTAINER:
+			return task.getEdgeDevice();
+		default:
+			return null;
+		}
+	}
+
+	private static DataCenter destinationDataCenter(Task task) {
+		if (task == null || task.getVm() == null || task.getVm().getHost() == null
+				|| !(task.getVm().getHost().getDatacenter() instanceof DataCenter)) return null;
+		return (DataCenter) task.getVm().getHost().getDatacenter();
 	}
 
 	protected void updateTransfer(FileTransferProgress transfer) {

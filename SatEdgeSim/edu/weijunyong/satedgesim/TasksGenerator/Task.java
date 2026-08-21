@@ -20,8 +20,12 @@ public class Task extends CloudletSimple {
 
 	public static enum Status {
 		FAILED_DUE_TO_LATENCY, FAILED_BECAUSE_DEVICE_DEAD, FAILED_DUE_TO_DEVICE_MOBILITY,
-		NOT_GENERATED_BECAUSE_DEVICE_DEAD, FAILED_NO_RESSOURCES, NULL
+		NOT_GENERATED_BECAUSE_DEVICE_DEAD, FAILED_NO_RESSOURCES, FAILED_DUE_TO_CONTACT_INTERRUPTION, NULL
 	}
+	private boolean contactInterrupted = false;
+	private double contactInterruptionTime = -1.0;
+	private double contactRemainingBytes = 0.0;
+	private String contactFailureReason = "none";
 
 	public Task(int id, long cloudletLength, long pesNumber) {
 		super(id, cloudletLength, pesNumber);
@@ -106,6 +110,38 @@ public class Task extends CloudletSimple {
 	public void setFailureReason(Status status) {
 		this.setStatus(Cloudlet.Status.FAILED);
 		this.failureReason = status;
+	}
+
+	public boolean isContactInterrupted() {
+		return contactInterrupted;
+	}
+
+	public void setContactInterrupted(boolean contactInterrupted) {
+		this.contactInterrupted = contactInterrupted;
+	}
+
+	public double getContactInterruptionTime() {
+		return contactInterruptionTime;
+	}
+
+	public void setContactInterruptionTime(double contactInterruptionTime) {
+		this.contactInterruptionTime = contactInterruptionTime;
+	}
+
+	public double getContactRemainingBytes() {
+		return contactRemainingBytes;
+	}
+
+	public void setContactRemainingBytes(double contactRemainingBytes) {
+		this.contactRemainingBytes = Math.max(0.0, contactRemainingBytes);
+	}
+
+	public String getContactFailureReason() {
+		return contactFailureReason;
+	}
+
+	public void setContactFailureReason(String contactFailureReason) {
+		this.contactFailureReason = contactFailureReason == null ? "none" : contactFailureReason;
 	}
 
 }
