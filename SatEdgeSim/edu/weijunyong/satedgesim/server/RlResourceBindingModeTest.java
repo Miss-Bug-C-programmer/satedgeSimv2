@@ -34,7 +34,7 @@ public class RlResourceBindingModeTest {
                 "native metadata must allow full closed-loop claims");
         require("vm_mips_scoped_min_active_share".equals(nativeMetadata.get("native_cpu_binding_scope")),
                 "native metadata must expose CPU binding scope");
-        require("file_transfer_progress_bandwidth_share".equals(nativeMetadata.get("native_network_binding_scope")),
+        require("shared_lan_domain_and_global_wan".equals(nativeMetadata.get("native_network_binding_scope")),
                 "native metadata must expose network binding scope");
         require("wireless_transmission_energy_ratio".equals(nativeMetadata.get("native_tx_power_binding_scope")),
                 "native metadata must expose power binding scope");

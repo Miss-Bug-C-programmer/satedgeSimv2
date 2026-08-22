@@ -1,6 +1,9 @@
 package edu.weijunyong.satedgesim.server;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -28,13 +31,28 @@ import edu.weijunyong.satedgesim.TasksGenerator.Task;
  */
 public final class RlNativeResourceBindingManager {
     public static final String CPU_BINDING_SCOPE = "vm_mips_scoped_min_active_share";
-    public static final String NETWORK_BINDING_SCOPE = "file_transfer_progress_bandwidth_share";
+    public static final String NETWORK_BINDING_SCOPE = "shared_lan_domain_and_global_wan";
     public static final String TX_POWER_BINDING_SCOPE = "wireless_transmission_energy_ratio";
 
     private static final Map<Long, Binding> taskBindings = new LinkedHashMap<Long, Binding>();
     private static final Map<Long, VmState> vmStates = new LinkedHashMap<Long, VmState>();
+    private static final List<Map<String, Object>> runtimeTrace = new ArrayList<Map<String, Object>>();
+    private static long runtimeSampleCount = 0L;
+    private static double maxCpuConservationViolation = 0.0;
 
     private RlNativeResourceBindingManager() {
+    }
+
+    /** Clears native bindings from the previous server session before a new world is built. */
+    public static synchronized void resetForSimulation() {
+        for (Binding binding : new ArrayList<Binding>(taskBindings.values())) {
+            if (binding != null && !binding.released) releaseBinding(binding, 0.0);
+        }
+        taskBindings.clear();
+        vmStates.clear();
+        runtimeSampleCount = 0L;
+        maxCpuConservationViolation = 0.0;
+        runtimeTrace.clear();
     }
 
     public static synchronized BindingSnapshot bindTask(
@@ -55,7 +73,7 @@ public final class RlNativeResourceBindingManager {
         long taskId = task.getId();
         long vmId = vm.getId();
         VmState state = vmStates.get(Long.valueOf(vmId));
-        if (state == null) {
+        if (state == null || state.vm != vm) {
             state = new VmState(vm, vmId, readVmMips(vm));
             vmStates.put(Long.valueOf(vmId), state);
         }
@@ -75,10 +93,11 @@ public final class RlNativeResourceBindingManager {
         binding.txPowerRatio = profile.txPowerRatioClamped;
         binding.baseMips = state.baseMips;
         binding.boundAt = simulationTime;
+        binding.lastObservedFinishedLength = Math.max(0.0, task.getFinishedLengthSoFar());
+        binding.lastObservedAt = simulationTime;
         taskBindings.put(Long.valueOf(taskId), binding);
         state.activeBindings.put(Long.valueOf(taskId), binding);
         recomputeVmMips(state);
-        binding.appliedMips = state.currentAppliedMips;
         binding.nativeBindingApplied = true;
         return binding.snapshot("bound");
     }
@@ -95,6 +114,36 @@ public final class RlNativeResourceBindingManager {
             return BindingSnapshot.notRequested();
         }
         return releaseBinding(binding, simulationTime);
+    }
+
+    /**
+     * Rebinds an already executing task without changing its VM placement.
+     * The same native binding registry is used, and active native transfers
+     * are refreshed so a bandwidth/power patch affects physical progression.
+     */
+    public static synchronized BindingSnapshot rebindTask(
+            Task task,
+            Vm vm,
+            int vmIndex,
+            RlResourceProfile profile,
+            double simulationTime,
+            SimulationManager simulationManager) {
+        BindingSnapshot snapshot = bindTask(task, vm, vmIndex, profile, simulationTime);
+        refreshTransfersForTask(task, simulationManager);
+        return snapshot;
+    }
+
+    public static synchronized BindingSnapshot snapshotForTask(Task task) {
+        if (task == null) return BindingSnapshot.notRequested();
+        Binding binding = taskBindings.get(Long.valueOf(task.getId()));
+        return binding == null ? BindingSnapshot.notRequested() : binding.snapshot("observed");
+    }
+
+    private static void refreshTransfersForTask(Task task, SimulationManager simulationManager) {
+        if (task == null || simulationManager == null || simulationManager.getNetworkModel() == null) return;
+        for (FileTransferProgress transfer : simulationManager.getNetworkModel().getTransferProgressList()) {
+            if (transfer != null && transfer.getTask() == task) attachToTransfer(transfer);
+        }
     }
 
     public static synchronized RlResourceProfile profileForTask(Task task) {
@@ -133,6 +182,70 @@ public final class RlNativeResourceBindingManager {
         transfer.setTxPowerRatioClamped(profile.txPowerRatioClamped);
     }
 
+    /**
+     * Observes service delivered by the native CloudSim Cloudlet scheduler.
+     * This is deliberately a delta of Cloudlet finished length over simulation
+     * time; it is not a second allocator.  The VM MIPS value remains the
+     * physical capacity consumed by CloudSim's scheduler.
+     */
+    public static synchronized void observeRuntimeProgress(List<Task> tasks, double simulationTime) {
+        Map<Long, Task> byId = new HashMap<Long, Task>();
+        if (tasks != null) {
+            for (Task task : tasks) {
+                if (task != null) byId.put(Long.valueOf(task.getId()), task);
+            }
+        }
+        for (Binding binding : taskBindings.values()) {
+            if (binding == null || binding.released) continue;
+            Task task = byId.get(Long.valueOf(binding.taskId));
+            if (task == null) continue;
+            double finished = Math.max(0.0, task.getFinishedLengthSoFar());
+            double elapsed = simulationTime - binding.lastObservedAt;
+            if (elapsed > 1.0e-9) {
+                double delta = Math.max(0.0, finished - binding.lastObservedFinishedLength);
+                binding.effectiveMips = delta / elapsed;
+                binding.effectiveCpuShare = binding.baseMips <= 0.0 ? 0.0 : binding.effectiveMips / binding.baseMips;
+                binding.observedAt = simulationTime;
+                runtimeSampleCount += 1L;
+            }
+            binding.lastObservedFinishedLength = finished;
+            binding.lastObservedAt = simulationTime;
+            binding.capacityMips = binding.vmState == null ? binding.appliedMips : binding.vmState.currentAppliedMips;
+            binding.contentionCount = binding.vmState == null ? 0 : binding.vmState.activeBindings.size();
+            binding.contentionContext = binding.vmState == null ? "unknown" :
+                    "vm:" + binding.vmState.vmId + ":active_tasks=" + binding.vmState.activeBindings.size();
+            if (elapsed > 1.0e-9) {
+                runtimeTrace.add(binding.snapshot("runtime_observed").toMap());
+                while (runtimeTrace.size() > 4096) runtimeTrace.remove(0);
+            }
+        }
+        for (VmState state : vmStates.values()) {
+            double effectiveSum = 0.0;
+            for (Binding binding : state.activeBindings.values()) {
+                if (binding != null && !binding.released) effectiveSum += Math.max(0.0, binding.effectiveMips);
+            }
+            maxCpuConservationViolation = Math.max(maxCpuConservationViolation,
+                    Math.max(0.0, effectiveSum - state.currentAppliedMips));
+        }
+    }
+
+    public static synchronized Map<String, Object> runtimeConservationEvidence() {
+        Map<String, Object> out = new LinkedHashMap<String, Object>();
+        List<Map<String, Object>> entries = new ArrayList<Map<String, Object>>();
+        for (Binding binding : taskBindings.values()) {
+            if (binding != null && !binding.released) entries.add(binding.snapshot("runtime_observed").toMap());
+        }
+        out.put("resource", "cpu");
+        out.put("observed", runtimeSampleCount > 0L);
+        out.put("sampleCount", runtimeSampleCount);
+        out.put("conservationSatisfied", runtimeSampleCount > 0L && maxCpuConservationViolation <= 1.0e-6);
+        out.put("maxEffectiveOverCapacityMips", maxCpuConservationViolation);
+        out.put("executionConsumer", "CloudSim_native_vm_cloudlet_scheduler");
+        out.put("entries", entries);
+        out.put("trace", new ArrayList<Map<String, Object>>(runtimeTrace));
+        return out;
+    }
+
     public static synchronized Map<String, Object> debugSnapshot() {
         Map<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("active_task_bindings", taskBindings.size());
@@ -143,6 +256,12 @@ public final class RlNativeResourceBindingManager {
             vm.put("base_mips", state.baseMips);
             vm.put("current_applied_mips", state.currentAppliedMips);
             vm.put("active_bindings", state.activeBindings.size());
+            double effectiveSum = 0.0;
+            for (Binding binding : state.activeBindings.values()) {
+                if (binding != null && !binding.released) effectiveSum += binding.effectiveMips;
+            }
+            vm.put("effective_mips_sum", effectiveSum);
+            vm.put("conservation_satisfied", effectiveSum <= state.currentAppliedMips + 1.0e-6);
             vms.put(String.valueOf(entry.getKey()), vm);
         }
         out.put("vm_states", vms);
@@ -177,6 +296,14 @@ public final class RlNativeResourceBindingManager {
         double targetMips = Math.max(1.0, state.baseMips * minShare);
         applyVmMips(state.vm, targetMips);
         state.currentAppliedMips = targetMips;
+        for (Binding binding : state.activeBindings.values()) {
+            if (binding != null && !binding.released) {
+                binding.appliedMips = targetMips;
+                binding.capacityMips = targetMips;
+                binding.contentionCount = state.activeBindings.size();
+                binding.contentionContext = "vm:" + state.vmId + ":active_tasks=" + state.activeBindings.size();
+            }
+        }
     }
 
     private static double readVmMips(Vm vm) {
@@ -197,13 +324,16 @@ public final class RlNativeResourceBindingManager {
         try {
             Method getProcessor = vm.getClass().getMethod("getProcessor");
             Object processor = getProcessor.invoke(vm);
+            if (processor != null && invokeSetter(processor, "setMips", double.class, Double.valueOf(target))) {
+                return;
+            }
+            if (processor != null && invokeSetter(processor, "setMips", long.class, Long.valueOf(Math.round(target)))) {
+                return;
+            }
             if (processor != null && invokeSetter(processor, "setCapacity", double.class, Double.valueOf(target))) {
                 return;
             }
             if (processor != null && invokeSetter(processor, "setCapacity", long.class, Long.valueOf(Math.round(target)))) {
-                return;
-            }
-            if (processor != null && invokeSetter(processor, "setMips", double.class, Double.valueOf(target))) {
                 return;
             }
         } catch (NoSuchMethodException e) {
@@ -260,6 +390,14 @@ public final class RlNativeResourceBindingManager {
         double restoredMips = 1.0;
         double boundAt = 0.0;
         double releasedAt = 0.0;
+        double effectiveMips = 0.0;
+        double effectiveCpuShare = 0.0;
+        double capacityMips = 1.0;
+        double lastObservedFinishedLength = 0.0;
+        double lastObservedAt = 0.0;
+        double observedAt = Double.NaN;
+        int contentionCount = 0;
+        String contentionContext = "unobserved";
         boolean nativeBindingApplied = false;
         boolean released = false;
 
@@ -279,6 +417,12 @@ public final class RlNativeResourceBindingManager {
             out.boundAt = boundAt;
             out.releasedAt = releasedAt;
             out.released = released;
+            out.effectiveMips = effectiveMips;
+            out.effectiveCpuShare = effectiveCpuShare;
+            out.capacityMips = capacityMips;
+            out.observedAt = Double.isFinite(observedAt) ? observedAt : -1.0;
+            out.contentionCount = contentionCount;
+            out.contentionContext = contentionContext;
             out.stage = stage;
             return out;
         }
@@ -298,6 +442,12 @@ public final class RlNativeResourceBindingManager {
         public double restoredMips = 0.0;
         public double boundAt = 0.0;
         public double releasedAt = 0.0;
+        public double effectiveMips = 0.0;
+        public double effectiveCpuShare = 0.0;
+        public double capacityMips = 0.0;
+        public double observedAt = Double.NaN;
+        public int contentionCount = 0;
+        public String contentionContext = "unobserved";
         public boolean released = false;
         public String stage = "not_requested";
 
@@ -321,6 +471,13 @@ public final class RlNativeResourceBindingManager {
             out.put("bound_at", boundAt);
             out.put("released_at", releasedAt);
             out.put("released", released);
+            out.put("requested_cpu_share", cpuShare);
+            out.put("effective_cpu_mips", effectiveMips);
+            out.put("effective_cpu_share", effectiveCpuShare);
+            out.put("cpu_capacity_mips", capacityMips);
+            out.put("contention_count", contentionCount);
+            out.put("contention_context", contentionContext);
+            out.put("effective_observed_at", observedAt);
             out.put("stage", stage);
             out.put("cpu_binding_scope", CPU_BINDING_SCOPE);
             out.put("network_binding_scope", NETWORK_BINDING_SCOPE);

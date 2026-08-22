@@ -1,7 +1,10 @@
 package edu.weijunyong.satedgesim.Network;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.cloudbus.cloudsim.core.CloudSimEntity;
 import org.cloudbus.cloudsim.core.events.SimEvent;
@@ -45,6 +48,21 @@ public abstract class NetworkModel extends CloudSimEntity {
 
 	public List<FileTransferProgress> getTransferProgressList() {
 		return transferProgressList;
+	}
+
+	/** Terminal transfer records emitted by the native progression source. */
+	public List<Map<String, Object>> getTransferEvidence() {
+		return Collections.emptyList();
+	}
+
+	/** Qualifying native contact interruptions only; zero-byte failures are excluded. */
+	public List<Map<String, Object>> getContactInterruptionEvidence() {
+		return Collections.emptyList();
+	}
+
+	/** Last native bandwidth conservation observation, if this model exposes one. */
+	public Map<String, Object> getBandwidthConservationEvidence() {
+		return new LinkedHashMap<String, Object>();
 	}
 
 	protected abstract void updateTasksProgress();

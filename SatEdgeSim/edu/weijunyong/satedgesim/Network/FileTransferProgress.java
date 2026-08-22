@@ -1,5 +1,8 @@
 package edu.weijunyong.satedgesim.Network;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import edu.weijunyong.satedgesim.TasksGenerator.Task;
 
 public class FileTransferProgress {
@@ -27,6 +30,24 @@ public class FileTransferProgress {
 	private boolean contactInterrupted = false;
 	private double contactInterruptionTime = Double.NaN;
 	private String contactFailureReason = "none";
+	private long transferId = -1L;
+	private double startedAtSec = Double.NaN;
+	private String sourceIdentifier = "unknown";
+	private String destinationIdentifier = "unknown";
+	private String contactIdentifier = "unknown";
+	private double transferredFileSize = 0.0; // in kbits, derived from native remaining-size progression
+	private boolean contactInterruptionQualified = false;
+	private String postInterruptionAction = "none";
+	private double effectiveLanBandwidth = 0.0;
+	private double effectiveWanBandwidth = 0.0;
+	private double lanCapacity = 0.0;
+	private double wanCapacity = 0.0;
+	private int lanContentionCount = 0;
+	private int wanContentionCount = 0;
+	private String lanContentionGroup = "unobserved";
+	private String wanContentionGroup = "unobserved";
+	private long allocationObservationCount = 0L;
+	private double lastAllocationTimeSec = Double.NaN;
 
 	public FileTransferProgress(Task task, double remainingFileSize, Type type) {
 		this.task = task;
@@ -40,7 +61,15 @@ public class FileTransferProgress {
 	}
 
 	public void setRemainingFileSize(double remainingFileSize) {
-		this.remainingFileSize = remainingFileSize;
+		double next = Math.max(0.0, remainingFileSize);
+		if (next < this.remainingFileSize) {
+			this.transferredFileSize += this.remainingFileSize - next;
+		}
+		this.remainingFileSize = next;
+	}
+
+	public double getTransferredFileSize() {
+		return Math.max(0.0, Math.min(fileSize, transferredFileSize));
 	}
 
 	public Task getTask() {
@@ -100,7 +129,47 @@ public class FileTransferProgress {
 	}
 	
 	public double getAverageBandwidth() {
-		return totalBandwidths/bwAllocationTimes;
+		return bwAllocationTimes == 0 ? 0.0 : totalBandwidths/bwAllocationTimes;
+	}
+
+	public long getTransferId() {
+		return transferId;
+	}
+
+	public void setTransferId(long transferId) {
+		this.transferId = transferId;
+	}
+
+	public double getStartedAtSec() {
+		return startedAtSec;
+	}
+
+	public void setStartedAtSec(double startedAtSec) {
+		this.startedAtSec = startedAtSec;
+	}
+
+	public String getSourceIdentifier() {
+		return sourceIdentifier;
+	}
+
+	public void setSourceIdentifier(String sourceIdentifier) {
+		this.sourceIdentifier = sourceIdentifier == null ? "unknown" : sourceIdentifier;
+	}
+
+	public String getDestinationIdentifier() {
+		return destinationIdentifier;
+	}
+
+	public void setDestinationIdentifier(String destinationIdentifier) {
+		this.destinationIdentifier = destinationIdentifier == null ? "unknown" : destinationIdentifier;
+	}
+
+	public String getContactIdentifier() {
+		return contactIdentifier;
+	}
+
+	public void setContactIdentifier(String contactIdentifier) {
+		this.contactIdentifier = contactIdentifier == null ? "unknown" : contactIdentifier;
 	}
 
 	public double getBandwidthShareClamped() {
@@ -181,6 +250,141 @@ public class FileTransferProgress {
 
 	public void setContactFailureReason(String contactFailureReason) {
 		this.contactFailureReason = contactFailureReason == null ? "none" : contactFailureReason;
+	}
+
+	public boolean isContactInterruptionQualified() {
+		return contactInterruptionQualified;
+	}
+
+	public void setContactInterruptionQualified(boolean contactInterruptionQualified) {
+		this.contactInterruptionQualified = contactInterruptionQualified;
+	}
+
+	public String getPostInterruptionAction() {
+		return postInterruptionAction;
+	}
+
+	public void setPostInterruptionAction(String postInterruptionAction) {
+		this.postInterruptionAction = postInterruptionAction == null ? "none" : postInterruptionAction;
+	}
+
+	public double getEffectiveLanBandwidth() {
+		return effectiveLanBandwidth;
+	}
+
+	public double getEffectiveWanBandwidth() {
+		return effectiveWanBandwidth;
+	}
+
+	public double getLanCapacity() {
+		return lanCapacity;
+	}
+
+	public double getWanCapacity() {
+		return wanCapacity;
+	}
+
+	public int getLanContentionCount() {
+		return lanContentionCount;
+	}
+
+	public int getWanContentionCount() {
+		return wanContentionCount;
+	}
+
+	public String getLanContentionGroup() {
+		return lanContentionGroup;
+	}
+
+	public String getWanContentionGroup() {
+		return wanContentionGroup;
+	}
+
+	public double getLastAllocationTimeSec() {
+		return lastAllocationTimeSec;
+	}
+
+	public long getAllocationObservationCount() {
+		return allocationObservationCount;
+	}
+
+	public void recordEffectiveAllocation(double effectiveLanBandwidth, double effectiveWanBandwidth,
+			double lanCapacity, double wanCapacity, int lanContentionCount, int wanContentionCount,
+			String lanContentionGroup, String wanContentionGroup) {
+		recordEffectiveAllocation(effectiveLanBandwidth, effectiveWanBandwidth, lanCapacity, wanCapacity,
+				lanContentionCount, wanContentionCount, lanContentionGroup, wanContentionGroup, Double.NaN);
+	}
+
+	public void recordEffectiveAllocation(double effectiveLanBandwidth, double effectiveWanBandwidth,
+			double lanCapacity, double wanCapacity, int lanContentionCount, int wanContentionCount,
+			String lanContentionGroup, String wanContentionGroup, double allocationTimeSec) {
+		this.effectiveLanBandwidth = Math.max(0.0, effectiveLanBandwidth);
+		this.effectiveWanBandwidth = Math.max(0.0, effectiveWanBandwidth);
+		this.lanCapacity = Math.max(0.0, lanCapacity);
+		this.wanCapacity = Math.max(0.0, wanCapacity);
+		this.lanContentionCount = Math.max(0, lanContentionCount);
+		this.wanContentionCount = Math.max(0, wanContentionCount);
+		this.lanContentionGroup = lanContentionGroup == null ? "unknown" : lanContentionGroup;
+		this.wanContentionGroup = wanContentionGroup == null ? "unknown" : wanContentionGroup;
+		this.lastAllocationTimeSec = allocationTimeSec;
+		this.allocationObservationCount += 1L;
+	}
+
+	/** Existing simulator units are kbits; expose an explicit SI-byte conversion for evidence. */
+	public double getTotalBytes() {
+		return Math.max(0.0, fileSize) * 125.0;
+	}
+
+	public double getTransferredBytes() {
+		return getTransferredFileSize() * 125.0;
+	}
+
+	public double getRemainingBytes() {
+		return getRemainingFileSize() * 125.0;
+	}
+
+	public Map<String, Object> toRuntimeEvidence(String terminalStatus, String terminalAction, double timestampSec) {
+		Map<String, Object> out = new LinkedHashMap<String, Object>();
+		out.put("transferId", transferId);
+		out.put("taskId", task == null ? -1L : task.getId());
+		out.put("transferType", transferType == null ? null : transferType.name());
+		out.put("source", sourceIdentifier);
+		out.put("destination", destinationIdentifier);
+		out.put("contactIdentifier", contactIdentifier);
+		out.put("startTimeSec", Double.isFinite(startedAtSec) ? startedAtSec : null);
+		out.put("contactEndTimeSec", Double.isFinite(contactEndSec) ? contactEndSec : null);
+		out.put("eventTimeSec", timestampSec);
+		out.put("totalKbits", fileSize);
+		out.put("transferredKbits", getTransferredFileSize());
+		out.put("remainingKbits", getRemainingFileSize());
+		out.put("totalBytes", getTotalBytes());
+		out.put("bytesMovedBeforeInterruption", getTransferredBytes());
+		out.put("remainingBytes", getRemainingBytes());
+		out.put("byteConversion", "1_kbit=125_SI_bytes");
+		out.put("contactRequired", contactRequired);
+		out.put("contactEvidenceAvailable", contactEvidenceAvailable);
+		out.put("contactInterrupted", contactInterrupted);
+		out.put("qualifyingMidTransferInterruption", contactInterruptionQualified);
+		out.put("contact_interruption_native", contactInterruptionQualified);
+		out.put("postInterruptionAction", terminalAction == null ? postInterruptionAction : terminalAction);
+		out.put("terminalStatus", terminalStatus == null ? "ACTIVE" : terminalStatus);
+		out.put("failureReason", contactFailureReason);
+		out.put("nativeNetworkBound", nativeNetworkBound);
+		out.put("requestedBandwidthShare", bandwidthShareClamped);
+		out.put("requestedTxPowerRatio", txPowerRatioClamped);
+		out.put("effectiveTxPowerRatio", txPowerRatioClamped);
+		out.put("txPowerExecutionConsumer", nativeTxPowerBound ? "DefaultEnergyModel.wireless_transmission" : "unbound");
+		out.put("effectiveLanBandwidth", effectiveLanBandwidth);
+		out.put("effectiveWanBandwidth", effectiveWanBandwidth);
+		out.put("lanCapacity", lanCapacity);
+		out.put("wanCapacity", wanCapacity);
+		out.put("lanContentionCount", lanContentionCount);
+		out.put("wanContentionCount", wanContentionCount);
+		out.put("lanContentionGroup", lanContentionGroup);
+		out.put("wanContentionGroup", wanContentionGroup);
+		out.put("allocationObservationCount", allocationObservationCount);
+		out.put("allocationTimestampSec", Double.isFinite(lastAllocationTimeSec) ? lastAllocationTimeSec : null);
+		return out;
 	}
 
 	private double clampShare(double value) {

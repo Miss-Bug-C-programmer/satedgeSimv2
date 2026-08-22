@@ -67,6 +67,10 @@ public class SatEdgeSimRestServer {
                 synchronized (sessionLock) {
                     if (session != null) {
                         session.close();
+                        if (session.isSimulationThreadAlive()) {
+                            throw new IllegalStateException(
+                                    "previous SatEdgeSim session did not terminate; refusing overlapping reset");
+                        }
                     }
                     newSession = new SatEdgeSimSession(config, request);
                     session = newSession;
@@ -276,6 +280,50 @@ public class SatEdgeSimRestServer {
                 Map<String, Object> request = body.trim().isEmpty()
                         ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
                 return ok(session.applyConfiguration(request));
+            }
+        });
+        server.createContext("/configuration/patch", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                Map<String, Object> request = body.trim().isEmpty()
+                        ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                return ok(session.applyConfigurationPatch(request));
+            }
+        });
+        server.createContext("/intervention", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "POST");
+                ensureSession();
+                Map<String, Object> request = body.trim().isEmpty()
+                        ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                return ok(session.applyConfigurationPatch(request));
+            }
+        });
+        server.createContext("/intervention_evidence", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getInterventionEvidence());
+            }
+        });
+        server.createContext("/protocol_events", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getProtocolEvents());
+            }
+        });
+        server.createContext("/dynamic_validation/report", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                ensureSession();
+                return ok(session.getDynamicValidationReport());
             }
         });
         server.createContext("/configuration/dispatch", new JsonHandler() {

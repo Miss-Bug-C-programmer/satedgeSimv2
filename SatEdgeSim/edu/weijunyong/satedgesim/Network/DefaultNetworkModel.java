@@ -1,6 +1,9 @@
 package edu.weijunyong.satedgesim.Network;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.cloudbus.cloudsim.core.events.SimEvent;
 
 import edu.weijunyong.satedgesim.DataCentersManager.DataCenter;
@@ -14,6 +17,11 @@ import edu.weijunyong.satedgesim.Topology.TopologyOracle;
 import edu.weijunyong.satedgesim.server.RlNativeResourceBindingManager;
 
 public class DefaultNetworkModel extends NetworkModel {
+	private long transferSequence = 0L;
+	private final List<Map<String, Object>> transferEvidence = new ArrayList<Map<String, Object>>();
+	private final List<Map<String, Object>> contactInterruptionEvidence = new ArrayList<Map<String, Object>>();
+	private Map<String, Object> lastBandwidthConservationEvidence = new LinkedHashMap<String, Object>();
+	private long bandwidthObservationCount = 0L;
 
 	public DefaultNetworkModel(SimulationManager simulationManager) {
 		super(simulationManager);
@@ -56,11 +64,39 @@ public class DefaultNetworkModel extends NetworkModel {
 		return transferProgressList;
 	}
 
+	@Override
+	public List<Map<String, Object>> getTransferEvidence() {
+		return new ArrayList<Map<String, Object>>(transferEvidence);
+	}
+
+	@Override
+	public List<Map<String, Object>> getContactInterruptionEvidence() {
+		return new ArrayList<Map<String, Object>>(contactInterruptionEvidence);
+	}
+
+	@Override
+	public Map<String, Object> getBandwidthConservationEvidence() {
+		return new LinkedHashMap<String, Object>(lastBandwidthConservationEvidence);
+	}
+
 	private FileTransferProgress newTransfer(Task task, double remainingFileSize, FileTransferProgress.Type type) {
 		FileTransferProgress transfer = new FileTransferProgress(task, remainingFileSize, type);
+		transfer.setTransferId(++transferSequence);
+		transfer.setStartedAtSec(simulationManager.getSimulation().clock());
+		DataCenter source = transferSource(transfer);
+		DataCenter destination = transferDestination(transfer);
+		String sourceId = endpointIdentifier(source);
+		String destinationId = endpointIdentifier(destination);
+		transfer.setSourceIdentifier(sourceId);
+		transfer.setDestinationIdentifier(destinationId);
+		transfer.setContactIdentifier(sourceId + "->" + destinationId);
 		RlNativeResourceBindingManager.attachToTransfer(transfer);
 		initializeContactState(transfer);
 		return transfer;
+	}
+
+	private static String endpointIdentifier(DataCenter dataCenter) {
+		return dataCenter == null ? "unknown" : dataCenter.getClass().getSimpleName() + ":" + dataCenter.getId();
 	}
 
 	public void sendRequestFromOrchToDest(Task task) {
@@ -100,39 +136,150 @@ public class DefaultNetworkModel extends NetworkModel {
 	}
 
 	protected void updateTasksProgress() {
-		// Ignore finished transfers, so we will start looping from the first index of
-		// the remaining transfers
-		for (int i = 0; i < transferProgressList.size(); i++) {
-			int remainingTransfersCount_Lan = 0;
-			int remainingTransfersCount_Wan = 0;
-			if (transferProgressList.get(i).getRemainingFileSize() > 0) {
-				if (contactClosed(transferProgressList.get(i))) {
-					failTransferForContact(transferProgressList.get(i));
-					i--;
-					continue;
-				}
-				for (int j = i; j < transferProgressList.size(); j++) {
-					if (transferProgressList.get(j).getRemainingFileSize() > 0 && j != i) {
-						if (wanIsUsed(transferProgressList.get(j))) {
-							remainingTransfersCount_Wan++;
-							bwUsage += transferProgressList.get(j).getRemainingFileSize();
-						}
-						if (sameLanIsUsed(transferProgressList.get(i).getTask(), transferProgressList.get(j).getTask())) {
-							// Both transfers use same Lan
-							remainingTransfersCount_Lan++;
-						}
+		List<FileTransferProgress> active = new ArrayList<FileTransferProgress>();
+		for (FileTransferProgress transfer : new ArrayList<FileTransferProgress>(transferProgressList)) {
+			if (transfer == null || transfer.getRemainingFileSize() <= 0.0) continue;
+			if (contactClosed(transfer)) {
+				failTransferForContact(transfer);
+				continue;
+			}
+			active.add(transfer);
+		}
+
+		List<List<FileTransferProgress>> lanGroups = buildLanGroups(active);
+		List<FileTransferProgress> wanGroup = new ArrayList<FileTransferProgress>();
+		for (FileTransferProgress transfer : active) {
+			if (wanIsUsed(transfer)) wanGroup.add(transfer);
+		}
+		Map<String, Double> lanTotals = new LinkedHashMap<String, Double>();
+		Map<String, Double> wanTotals = new LinkedHashMap<String, Double>();
+		for (int groupIndex = 0; groupIndex < lanGroups.size(); groupIndex++) {
+			List<FileTransferProgress> group = lanGroups.get(groupIndex);
+			String groupId = "lan-domain-" + groupIndex;
+			double total = 0.0;
+			for (FileTransferProgress transfer : group) total += requestedBandwidthWeight(transfer);
+			lanTotals.put(groupId, Double.valueOf(total));
+		}
+		if (!wanGroup.isEmpty()) {
+			double total = 0.0;
+			for (FileTransferProgress transfer : wanGroup) total += requestedBandwidthWeight(transfer);
+			wanTotals.put("wan-global", Double.valueOf(total));
+		}
+
+		for (FileTransferProgress transfer : active) {
+			List<FileTransferProgress> lanGroup = findLanGroup(lanGroups, transfer);
+			String lanGroupId = "lan-domain-" + lanGroups.indexOf(lanGroup);
+			double lanTotal = lanTotals.get(lanGroupId).doubleValue();
+			double effectiveLan = weightedCapacity(simulationParameters.BANDWIDTH_WLAN,
+				requestedBandwidthWeight(transfer), lanTotal);
+			double effectiveWan = wanIsUsed(transfer)
+				? weightedCapacity(simulationParameters.WAN_BANDWIDTH,
+						requestedBandwidthWeight(transfer), wanTotals.get("wan-global").doubleValue())
+				: 0.0;
+			transfer.setLanBandwidth(effectiveLan);
+			transfer.setWanBandwidth(effectiveWan);
+			transfer.recordEffectiveAllocation(effectiveLan, effectiveWan,
+					simulationParameters.BANDWIDTH_WLAN, simulationParameters.WAN_BANDWIDTH,
+					lanGroup.size(), wanGroup.size(), lanGroupId, wanIsUsed(transfer) ? "wan-global" : "not-used",
+					simulationManager.getSimulation().clock());
+			updateBandwidth(transfer);
+		}
+
+		if (!active.isEmpty()) {
+			lastBandwidthConservationEvidence = buildBandwidthConservationEvidence(active, lanGroups, wanGroup);
+			lastBandwidthConservationEvidence.put("simulationTimeSec", simulationManager.getSimulation().clock());
+			bandwidthObservationCount += 1L;
+			lastBandwidthConservationEvidence.put("observationCount", bandwidthObservationCount);
+		}
+		for (FileTransferProgress transfer : active) updateTransfer(transfer);
+	}
+
+	static double requestedBandwidthWeight(FileTransferProgress transfer) {
+		return Math.max(0.10, Math.min(1.0, transfer.getBandwidthShareClamped()));
+	}
+
+	static double weightedCapacity(double capacity, double weight, double totalWeight) {
+		if (capacity <= 0.0 || totalWeight <= 0.0) return 0.0;
+		return capacity * weight / totalWeight;
+	}
+
+	private List<List<FileTransferProgress>> buildLanGroups(List<FileTransferProgress> active) {
+		List<List<FileTransferProgress>> groups = new ArrayList<List<FileTransferProgress>>();
+		for (FileTransferProgress transfer : active) {
+			List<List<FileTransferProgress>> matchingGroups = new ArrayList<List<FileTransferProgress>>();
+			for (List<FileTransferProgress> group : groups) {
+				for (FileTransferProgress member : group) {
+					if (sameLanIsUsed(transfer.getTask(), member.getTask())) {
+						matchingGroups.add(group);
+						break;
 					}
 				}
-				// allocate bandwidths
-				FileTransferProgress transfer = transferProgressList.get(i);
-				double bandwidthShare = Math.max(0.10, Math.min(1.0, transfer.getBandwidthShareClamped()));
-				transfer.setLanBandwidth(getLanBandwidth(remainingTransfersCount_Lan) * bandwidthShare);
-				transfer.setWanBandwidth(getWanBandwidth(remainingTransfersCount_Wan) * bandwidthShare);
-				updateBandwidth(transferProgressList.get(i));
-				updateTransfer(transferProgressList.get(i));
 			}
-
+			if (matchingGroups.isEmpty()) {
+				List<FileTransferProgress> group = new ArrayList<FileTransferProgress>();
+				group.add(transfer);
+				groups.add(group);
+				continue;
+			}
+			List<FileTransferProgress> matching = matchingGroups.get(0);
+			for (int index = 1; index < matchingGroups.size(); index++) {
+				List<FileTransferProgress> merged = matchingGroups.get(index);
+				matching.addAll(merged);
+				groups.remove(merged);
+			}
+			matching.add(transfer);
 		}
+		return groups;
+	}
+
+	private static List<FileTransferProgress> findLanGroup(List<List<FileTransferProgress>> groups,
+			FileTransferProgress transfer) {
+		for (List<FileTransferProgress> group : groups) {
+			if (group.contains(transfer)) return group;
+		}
+		return new ArrayList<FileTransferProgress>();
+	}
+
+	private static Map<String, Object> buildBandwidthConservationEvidence(List<FileTransferProgress> active,
+			List<List<FileTransferProgress>> lanGroups, List<FileTransferProgress> wanGroup) {
+		Map<String, Object> evidence = new LinkedHashMap<String, Object>();
+		boolean satisfied = true;
+		List<Map<String, Object>> groups = new ArrayList<Map<String, Object>>();
+		for (int index = 0; index < lanGroups.size(); index++) {
+			List<FileTransferProgress> group = lanGroups.get(index);
+			double sum = 0.0;
+			for (FileTransferProgress transfer : group) sum += transfer.getEffectiveLanBandwidth();
+			boolean ok = sum <= simulationParameters.BANDWIDTH_WLAN + 1.0e-9;
+			satisfied = satisfied && ok;
+			Map<String, Object> item = new LinkedHashMap<String, Object>();
+			item.put("resource", "lan");
+			item.put("group", "lan-domain-" + index);
+			item.put("flowCount", group.size());
+			item.put("capacity", simulationParameters.BANDWIDTH_WLAN);
+			item.put("effectiveSum", sum);
+			item.put("conserved", ok);
+			groups.add(item);
+		}
+		if (!wanGroup.isEmpty()) {
+			double sum = 0.0;
+			for (FileTransferProgress transfer : wanGroup) sum += transfer.getEffectiveWanBandwidth();
+			boolean ok = sum <= simulationParameters.WAN_BANDWIDTH + 1.0e-9;
+			satisfied = satisfied && ok;
+			Map<String, Object> item = new LinkedHashMap<String, Object>();
+			item.put("resource", "wan_global");
+			item.put("group", "wan-global");
+			item.put("flowCount", wanGroup.size());
+			item.put("capacity", simulationParameters.WAN_BANDWIDTH);
+			item.put("effectiveSum", sum);
+			item.put("conserved", ok);
+			groups.add(item);
+		}
+		evidence.put("observed", !active.isEmpty());
+		evidence.put("conservationSatisfied", satisfied);
+		evidence.put("scope", "shared_lan_domain_and_global_wan");
+		evidence.put("perLinkAllocationSupported", false);
+		evidence.put("groups", groups);
+		return evidence;
 	}
 
 	private void initializeContactState(FileTransferProgress transfer) {
@@ -165,19 +312,36 @@ public class DefaultNetworkModel extends NetworkModel {
 	private void failTransferForContact(FileTransferProgress transfer) {
 		double now = simulationManager.getSimulation().clock();
 		String reason = ContactEnforcementPolicy.failureReason(transfer.isContactEvidenceAvailable());
+		boolean qualifying = transfer.isContactEvidenceAvailable()
+				&& ContactEnforcementPolicy.isQualifyingMidTransfer(
+						transfer.getTransferredFileSize(), transfer.getRemainingFileSize());
+		String action = qualifying ? "fail_task_after_partial_transfer" : "fail_task_before_positive_progress";
 		transfer.setContactInterrupted(true);
 		transfer.setContactInterruptionTime(now);
 		transfer.setContactFailureReason(reason);
+		transfer.setContactInterruptionQualified(qualifying);
+		transfer.setPostInterruptionAction(action);
 		Task task = transfer.getTask();
 		if (task != null) {
 			task.setContactInterrupted(true);
 			task.setContactInterruptionTime(now);
 			task.setContactRemainingBytes(transfer.getRemainingFileSize());
 			task.setContactFailureReason(reason);
+			task.setContactInterruptionQualified(qualifying);
+			task.setContactTransferredBytes(transfer.getTransferredBytes());
 			task.setFailureReason(Task.Status.FAILED_DUE_TO_CONTACT_INTERRUPTION);
 		}
+		Map<String, Object> evidence = transfer.toRuntimeEvidence("FAILED", action, now);
+		transferEvidence.add(evidence);
+		if (qualifying) contactInterruptionEvidence.add(evidence);
+		trimEvidence();
 		transferProgressList.remove(transfer);
 		if (task != null) simulationManager.failTaskDueToContact(task);
+	}
+
+	private void trimEvidence() {
+		while (transferEvidence.size() > 4096) transferEvidence.remove(0);
+		while (contactInterruptionEvidence.size() > 1024) contactInterruptionEvidence.remove(0);
 	}
 
 	private static DataCenter transferSource(FileTransferProgress transfer) {
@@ -227,19 +391,22 @@ public class DefaultNetworkModel extends NetworkModel {
 	protected void updateTransfer(FileTransferProgress transfer) {
 
 		double oldRemainingSize = transfer.getRemainingFileSize();
+		double bandwidth = Math.max(0.0, transfer.getCurrentBandwidth());
+		double progress = Math.min(oldRemainingSize,
+				simulationParameters.NETWORK_UPDATE_INTERVAL * bandwidth);
+		if (progress <= 0.0) return;
 
 		// Update progress (remaining file size)
-		transfer.setRemainingFileSize(transfer.getRemainingFileSize()
-				- (simulationParameters.NETWORK_UPDATE_INTERVAL * transfer.getCurrentBandwidth()));
+		transfer.setRemainingFileSize(oldRemainingSize - progress);
 
 		// Update LAN network usage delay
 		transfer.setLanNetworkUsage(transfer.getLanNetworkUsage()
-				+ (oldRemainingSize - transfer.getRemainingFileSize()) / transfer.getCurrentBandwidth());
+				+ progress / bandwidth);
 
 		// Update WAN network usage delay
 		if (wanIsUsed(transfer))
 			transfer.setWanNetworkUsage(transfer.getWanNetworkUsage()
-					+ (oldRemainingSize - transfer.getRemainingFileSize()) / transfer.getCurrentBandwidth());
+					+ progress / bandwidth);
 		if (transfer.getRemainingFileSize() <= 0) {// Transfer finished
 			transfer.setRemainingFileSize(0);
 			transferFinished(transfer);
@@ -279,6 +446,8 @@ public class DefaultNetworkModel extends NetworkModel {
 	}
 
 	protected void transferFinished(FileTransferProgress transfer) {
+		transferEvidence.add(transfer.toRuntimeEvidence("COMPLETED", "complete", simulationManager.getSimulation().clock()));
+		trimEvidence();
 		// Update logger parameters
 		simulationManager.getSimulationLogger().updateNetworkUsage(transfer);
 

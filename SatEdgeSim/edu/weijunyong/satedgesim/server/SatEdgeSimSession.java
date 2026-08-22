@@ -49,15 +49,20 @@ public class SatEdgeSimSession {
     private final ServerConfig config;
     private final ResetRequest resetRequest;
     private final RlDecisionBridge bridge;
+    private final boolean strictPhysicalClaims;
 
     private Thread simulationThread;
     private CloudSim simulation;
     private SimulationManager simulationManager;
     private SimLog simLog;
     private volatile Throwable failure;
-    private PersistentExecutionConfiguration currentConfiguration;
+    private ExecutionConfiguration currentConfiguration;
     private double configurationAppliedAtSec = Double.NaN;
     private long configurationReceiptSequence = 0L;
+    private long interventionEvidenceSequence = 0L;
+    private long worldVersion = 0L;
+    private final List<Map<String, Object>> interventionEvidence = new ArrayList<Map<String, Object>>();
+    private final List<Map<String, Object>> protocolEvents = new ArrayList<Map<String, Object>>();
     private boolean controlEpochPausedForActivation = false;
 
     private Class<? extends Mobility> mobilityManager = DefaultMobilityModel.class;
@@ -72,6 +77,7 @@ public class SatEdgeSimSession {
         this.config = config;
         this.resetRequest = resetRequest == null ? new ResetRequest() : resetRequest;
         this.bridge = new RlDecisionBridge(sessionId);
+        this.strictPhysicalClaims = this.resetRequest.strictPhysicalClaims;
     }
 
     public String getSessionId() {
@@ -181,6 +187,7 @@ public class SatEdgeSimSession {
     }
 
     private void buildSimulation() throws Exception {
+        RlNativeResourceBindingManager.resetForSimulation();
         int devicesCount = resetRequest.devicesCount == -1
                 ? simulationParameters.MAX_NUM_OF_EDGE_DEVICES : resetRequest.devicesCount;
         int algorithmIndex = clamp(resetRequest.algorithmIndex, 0, simulationParameters.ORCHESTRATION_AlGORITHMS.length - 1);
@@ -583,12 +590,35 @@ public class SatEdgeSimSession {
         result.put("version", currentConfiguration == null ? 0L : currentConfiguration.version);
         result.put("configurationAgeSec", currentConfiguration == null || !Double.isFinite(configurationAppliedAtSec)
                 ? null : Math.max(0.0, simulation.clock() - configurationAppliedAtSec));
+        result.put("configurationAgeFromRuntimeTimestampSec", currentConfiguration == null || simulation == null
+                ? null : currentConfiguration.ageAt(simulation.clock()));
+        result.put("configurationExpired", currentConfiguration != null && simulation != null
+                && currentConfiguration.isExpired(simulation.clock()));
+        result.put("worldVersion", worldVersion);
         result.put("configuration", currentConfiguration == null ? null : currentConfiguration.toMap());
         result.put("containsFutureStochasticState", false);
         return result;
     }
 
     public synchronized Map<String, Object> validateConfiguration(Map<String, Object> request) {
+        if (request != null && (request.containsKey("patch") || request.containsKey("configurationPatch")
+                || request.containsKey("baseConfigurationVersion") || request.containsKey("base_configuration_version")
+                || request.containsKey("requestedScope") || request.containsKey("requested_scope")
+                || request.containsKey("taskAssignmentChanges") || request.containsKey("task_assignment_changes")
+                || request.containsKey("routeChanges") || request.containsKey("route_changes")
+                || request.containsKey("resourceChanges") || request.containsKey("resource_changes")
+                || request.containsKey("cpuAllocationChanges") || request.containsKey("cpu_allocation_changes")
+                || request.containsKey("bandwidthAllocationChanges") || request.containsKey("bandwidth_allocation_changes")
+                || request.containsKey("priorityChanges") || request.containsKey("priority_changes")
+                || request.containsKey("persistentRuleChanges") || request.containsKey("persistent_rule_changes"))) {
+            ConfigurationPatch patch = ConfigurationPatch.fromRequest(request);
+            double now = simulation == null ? 0.0 : simulation.clock();
+            ReconfigurationExecutor executor = new ReconfigurationExecutor(simulationManager, now, worldVersion);
+            Map<String, Object> validation = executor.validate(currentConfiguration, patch, strictPhysicalClaims).toMap();
+            validation.put("validationOnly", true);
+            validation.put("validationSource", "satedgesim_native_runtime");
+            return validation;
+        }
         PersistentExecutionConfiguration candidate = PersistentExecutionConfiguration.fromRequest(request);
         Map<String, Object> receipt = new LinkedHashMap<String, Object>();
         receipt.put("receiptType", "configuration_validation");
@@ -596,6 +626,7 @@ public class SatEdgeSimSession {
         receipt.put("configId", candidate.configId);
         receipt.put("version", candidate.version);
         receipt.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        receipt.put("worldVersion", worldVersion);
         receipt.put("containsFutureStochasticState", false);
         List<String> reasons = new ArrayList<String>();
         if (candidate.configId == null || candidate.configId.trim().isEmpty()) {
@@ -613,15 +644,25 @@ public class SatEdgeSimSession {
                 reasons.add("stale_configuration_version");
             }
         }
+        if (simulation != null && candidate.expiresAtSimTimeSec == candidate.expiresAtSimTimeSec
+                && simulation.clock() >= candidate.expiresAtSimTimeSec) {
+            reasons.add("expired_configuration");
+        }
         if (candidate.assignments.isEmpty() && candidate.reusableRules.isEmpty()) {
             reasons.add("no_persistent_execution_rule");
         }
         validateBindings(candidate.assignments, reasons);
         validateBindings(candidate.reusableRules, reasons);
+        validateBindings(candidate.resourceAllocations, reasons);
+        validateBindings(candidate.cpuAllocations, reasons);
+        validateBindings(candidate.bandwidthAllocations, reasons);
+        validateScalarAllocations(candidate.cpuAllocations, "cpu", reasons);
+        validateScalarAllocations(candidate.bandwidthAllocations, "bandwidth", reasons);
         receipt.put("accepted", reasons.isEmpty());
         receipt.put("reasons", reasons);
         receipt.put("validationSource", "satedgesim_physical_backend");
         receipt.put("targetAvailabilityChecked", simulationManager != null && simulationManager.getServersManager() != null);
+        receipt.put("simTimeExpiryAuthoritative", true);
         return receipt;
     }
 
@@ -649,6 +690,56 @@ public class SatEdgeSimSession {
             return rejected;
         }
         return advanceWorldInternal(deltaSec, true);
+    }
+
+    /**
+     * Snapshot native execution progress around a physical delay.  This is
+     * intentionally derived from CloudSim task status/finished length and
+     * the live native transfer list; it is not a synthetic clock-only flag.
+     */
+    private Map<String, Object> capturePhysicalProgressSnapshot() {
+        Map<String, Object> snapshot = new LinkedHashMap<String, Object>();
+        double observationTime = simulation == null ? 0.0 : simulation.clock();
+        RlNativeResourceBindingManager.observeRuntimeProgress(
+                simulationManager == null ? null : simulationManager.getTasksList(), observationTime);
+        double remainingTaskWork = 0.0;
+        double finishedTaskWork = 0.0;
+        Map<String, Integer> statusCounts = new LinkedHashMap<String, Integer>();
+        if (simulationManager != null && simulationManager.getTasksList() != null) {
+            for (Task task : simulationManager.getTasksList()) {
+                if (task == null) continue;
+                double length = Math.max(0.0, task.getLength());
+                double finished = Math.max(0.0, Math.min(length, task.getFinishedLengthSoFar()));
+                remainingTaskWork += Math.max(0.0, length - finished);
+                finishedTaskWork += finished;
+                String status = task.getStatus() == null ? "UNKNOWN" : task.getStatus().name();
+                Integer count = statusCounts.get(status);
+                statusCounts.put(status, Integer.valueOf(count == null ? 1 : count.intValue() + 1));
+            }
+        }
+        double remainingNetworkWork = 0.0;
+        int activeTransfers = 0;
+        if (simulationManager != null && simulationManager.getNetworkModel() != null
+                && simulationManager.getNetworkModel().getTransferProgressList() != null) {
+            for (FileTransferProgress transfer : new ArrayList<FileTransferProgress>(
+                    simulationManager.getNetworkModel().getTransferProgressList())) {
+                if (transfer == null || transfer.getRemainingFileSize() <= 0.0) continue;
+                activeTransfers += 1;
+                remainingNetworkWork += Math.max(0.0, transfer.getRemainingFileSize());
+            }
+        }
+        snapshot.put("remainingTaskWorkload", Double.valueOf(remainingTaskWork));
+        snapshot.put("finishedTaskWorkload", Double.valueOf(finishedTaskWork));
+        snapshot.put("taskStatusCounts", statusCounts);
+        snapshot.put("activeTransferCount", Integer.valueOf(activeTransfers));
+        snapshot.put("remainingNetworkWork", Double.valueOf(remainingNetworkWork));
+        snapshot.put("cpuConservation", RlNativeResourceBindingManager.runtimeConservationEvidence());
+        if (simulationManager != null && simulationManager.getNetworkModel() != null) {
+            snapshot.put("bandwidthConservation", simulationManager.getNetworkModel().getBandwidthConservationEvidence());
+            snapshot.put("nativeContactInterruptionCount",
+                    simulationManager.getNetworkModel().getContactInterruptionEvidence().size());
+        }
+        return snapshot;
     }
 
     private synchronized Map<String, Object> advanceWorldInternal(double deltaSec, boolean controlEpoch) {
@@ -703,6 +794,8 @@ public class SatEdgeSimSession {
             }
         }
         double before = simulation.clock();
+        long worldVersionBefore = worldVersion;
+        Map<String, Object> physicalProgressBefore = capturePhysicalProgressSnapshot();
         double target = before + deltaSec;
         boolean scheduled = simulation.pause(target);
         boolean blockedByUnmaterializedTask = false;
@@ -723,6 +816,12 @@ public class SatEdgeSimSession {
             }
         }
         double after = simulation.clock();
+        Map<String, Object> physicalProgressAfter = capturePhysicalProgressSnapshot();
+        boolean physicalStateChanged = !physicalProgressBefore.equals(physicalProgressAfter);
+        if (after > before) {
+            worldVersion += 1L;
+            if (currentConfiguration != null) currentConfiguration.worldVersion = worldVersion;
+        }
         List<Long> uncoveredTaskIds = new ArrayList<Long>();
         if (simulationManager != null && simulationManager.getTasksList() != null) {
             for (Task task : simulationManager.getTasksList()) {
@@ -742,9 +841,13 @@ public class SatEdgeSimSession {
             blocked.put("requestedDeltaSec", deltaSec);
             blocked.put("simulationTimeBeforeSec", before);
             blocked.put("simulationTimeSec", after);
+            blocked.put("worldVersionBefore", worldVersionBefore);
+            blocked.put("worldVersion", worldVersion);
             blocked.put("targetSimulationTimeSec", target);
             blocked.put("physicalClockAdvanced", after > before);
-            blocked.put("physicalStateChanged", after > before);
+            blocked.put("physicalStateChanged", physicalStateChanged);
+            blocked.put("physicalProgressBefore", physicalProgressBefore);
+            blocked.put("physicalProgressAfter", physicalProgressAfter);
             blocked.put("directClockMutation", false);
             blocked.put("advanceMechanism", "CloudSim.pauseAt");
             blocked.put("controlEpoch", true);
@@ -772,9 +875,13 @@ public class SatEdgeSimSession {
         result.put("requestedDeltaSec", deltaSec);
         result.put("simulationTimeBeforeSec", before);
         result.put("simulationTimeSec", after);
+        result.put("worldVersionBefore", worldVersionBefore);
+        result.put("worldVersion", worldVersion);
         result.put("targetSimulationTimeSec", target);
         result.put("physicalClockAdvanced", after > before);
-        result.put("physicalStateChanged", after > before);
+        result.put("physicalStateChanged", physicalStateChanged);
+        result.put("physicalProgressBefore", physicalProgressBefore);
+        result.put("physicalProgressAfter", physicalProgressAfter);
         result.put("directClockMutation", false);
         result.put("advanceMechanism", "CloudSim.pauseAt");
         result.put("controlEpoch", controlEpoch);
@@ -832,6 +939,11 @@ public class SatEdgeSimSession {
             return validation;
         }
         Map<String, Object> receipt = new LinkedHashMap<String, Object>();
+        double now = simulation == null ? 0.0 : simulation.clock();
+        candidate.worldVersion = worldVersion;
+        if (!Double.isFinite(candidate.creationSimTimeSec)) candidate.creationSimTimeSec = now;
+        if (!Double.isFinite(candidate.lastUpdateSimTimeSec)) candidate.lastUpdateSimTimeSec = now;
+        if (Double.isFinite(candidate.configuredLifetimeSec)) candidate.expiresAtSimTimeSec = now + candidate.configuredLifetimeSec;
         boolean idempotent = currentConfiguration != null
                 && currentConfiguration.configId.equals(candidate.configId)
                 && currentConfiguration.version == candidate.version
@@ -839,7 +951,7 @@ public class SatEdgeSimSession {
         Map<String, Object> before = currentConfiguration == null ? new LinkedHashMap<String, Object>() : currentConfiguration.toMap();
         currentConfiguration = candidate;
         if (!idempotent || !Double.isFinite(configurationAppliedAtSec)) {
-            configurationAppliedAtSec = simulation == null ? Double.NaN : simulation.clock();
+            configurationAppliedAtSec = now;
         }
         bridge.setPersistentConfiguration(candidate);
         boolean resumedAfterControlEpoch = controlEpochPausedForActivation && simulation != null && simulation.isPaused();
@@ -855,6 +967,7 @@ public class SatEdgeSimSession {
         receipt.put("configId", candidate.configId);
         receipt.put("version", candidate.version);
         receipt.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        receipt.put("worldVersion", worldVersion);
         receipt.put("changed", !idempotent);
         receipt.put("previousConfiguration", before);
         receipt.put("configuration", candidate.toMap());
@@ -862,7 +975,178 @@ public class SatEdgeSimSession {
         receipt.put("dispatchMode", "persistent_reusable_rule");
         receipt.put("resumedAfterControlEpoch", resumedAfterControlEpoch);
         receipt.put("containsFutureStochasticState", false);
+        recordProtocolEvent("configuration_apply", receipt);
         return receipt;
+    }
+
+    /** Canonical intervention endpoint: apply one selective ΔΠ_k. */
+    public synchronized Map<String, Object> applyConfigurationPatch(Map<String, Object> request) {
+        ConfigurationPatch patch = ConfigurationPatch.fromRequest(request);
+        double now = simulation == null ? 0.0 : simulation.clock();
+        ReconfigurationExecutor executor = new ReconfigurationExecutor(simulationManager, now, worldVersion);
+        PatchApplicationResult result = executor.apply(currentConfiguration, patch, strictPhysicalClaims);
+        if (result.accepted && result.changed) {
+            currentConfiguration = PersistentExecutionConfiguration.fromRequest(result.afterConfiguration);
+            bridge.setPersistentConfiguration(currentConfiguration);
+            configurationAppliedAtSec = now;
+            result.afterConfiguration = currentConfiguration.toMap();
+        }
+        result.evidenceId = sessionId + "-intervention-" + (++interventionEvidenceSequence);
+        Map<String, Object> evidence = result.toMap();
+        boolean resumedAfterControlEpoch = controlEpochPausedForActivation && simulation != null && simulation.isPaused();
+        if (resumedAfterControlEpoch) {
+            simulation.resume();
+            controlEpochPausedForActivation = false;
+        }
+        evidence.put("resumedAfterControlEpoch", resumedAfterControlEpoch);
+        evidence.put("configurationId", currentConfiguration == null ? null : currentConfiguration.configId);
+        evidence.put("configurationVersion", currentConfiguration == null ? 0L : currentConfiguration.version);
+        evidence.put("physicalTaskStateSource", "CloudSim Cloudlet status + native transfer progression");
+        evidence.put("migrationCapability", ReconfigurationExecutor.SUPPORTS_TASK_TARGET_MIGRATION);
+        evidence.put("routeActuationCapability", ReconfigurationExecutor.SUPPORTS_ROUTE_ACTUATION);
+        interventionEvidence.add(evidence);
+        while (interventionEvidence.size() > 256) interventionEvidence.remove(0);
+        recordProtocolEvent(result.accepted ? "configuration_patch_applied" : "configuration_patch_rejected", evidence);
+        return evidence;
+    }
+
+    public synchronized Map<String, Object> getInterventionEvidence() {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("receiptType", "intervention_evidence");
+        result.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        result.put("worldVersion", worldVersion);
+        result.put("configuration", currentConfiguration == null ? null : currentConfiguration.toMap());
+        result.put("evidence", new ArrayList<Map<String, Object>>(interventionEvidence));
+        result.put("evidenceCount", interventionEvidence.size());
+        if (simulationManager != null && simulationManager.getNetworkModel() != null) {
+            result.put("nativeTransferEvidence", simulationManager.getNetworkModel().getTransferEvidence());
+            result.put("nativeContactInterruptionEvidence",
+                    simulationManager.getNetworkModel().getContactInterruptionEvidence());
+            result.put("bandwidthConservationEvidence",
+                    simulationManager.getNetworkModel().getBandwidthConservationEvidence());
+        }
+        result.put("containsFutureStochasticState", false);
+        return result;
+    }
+
+    public synchronized Map<String, Object> getProtocolEvents() {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("receiptType", "protocol_events");
+        result.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        result.put("worldVersion", worldVersion);
+        result.put("events", new ArrayList<Map<String, Object>>(protocolEvents));
+        result.put("eventCount", protocolEvents.size());
+        result.put("containsFutureStochasticState", false);
+        return result;
+    }
+
+    public synchronized Map<String, Object> getDynamicValidationReport() {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("receiptType", "dynamic_validation_report");
+        result.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        result.put("worldVersion", worldVersion);
+        result.put("strictPhysicalClaims", strictPhysicalClaims);
+        result.put("configurationVersion", currentConfiguration == null ? 0L : currentConfiguration.version);
+        result.put("configurationExpired", currentConfiguration != null && simulation != null && currentConfiguration.isExpired(simulation.clock()));
+        result.put("supportsTaskTargetMigration", ReconfigurationExecutor.SUPPORTS_TASK_TARGET_MIGRATION);
+        result.put("supportsRouteActuation", ReconfigurationExecutor.SUPPORTS_ROUTE_ACTUATION);
+        result.put("supportsDynamicPriorityActuation", ReconfigurationExecutor.SUPPORTS_DYNAMIC_PRIORITY_ACTUATION);
+        result.put("interventionEvidenceCount", interventionEvidence.size());
+        Map<String, Object> cpuConservation = RlNativeResourceBindingManager.runtimeConservationEvidence();
+        Map<String, Object> bandwidthConservation = simulationManager == null || simulationManager.getNetworkModel() == null
+                ? new LinkedHashMap<String, Object>()
+                : simulationManager.getNetworkModel().getBandwidthConservationEvidence();
+        List<Map<String, Object>> transferEvidence = simulationManager == null || simulationManager.getNetworkModel() == null
+                ? new ArrayList<Map<String, Object>>()
+                : simulationManager.getNetworkModel().getTransferEvidence();
+        List<Map<String, Object>> contactEvidence = simulationManager == null || simulationManager.getNetworkModel() == null
+                ? new ArrayList<Map<String, Object>>()
+                : simulationManager.getNetworkModel().getContactInterruptionEvidence();
+        boolean transferEvidenceConsistent = true;
+        Set<Long> transferIds = new HashSet<Long>();
+        for (Map<String, Object> item : transferEvidence) {
+            long transferId = numberAsLong(item.get("transferId"), -1L);
+            double total = numberAsDouble(item.get("totalKbits"), -1.0);
+            double moved = numberAsDouble(item.get("transferredKbits"), -1.0);
+            double remaining = numberAsDouble(item.get("remainingKbits"), -1.0);
+            boolean bytesValid = total >= 0.0 && moved >= 0.0 && remaining >= 0.0
+                    && moved + remaining <= total + 1.0e-6;
+            boolean unique = transferId >= 0L && transferIds.add(Long.valueOf(transferId));
+            transferEvidenceConsistent = transferEvidenceConsistent && bytesValid && unique;
+        }
+        boolean contactEvidenceConsistent = true;
+        Set<Long> contactTransferIds = new HashSet<Long>();
+        for (Map<String, Object> item : contactEvidence) {
+            long transferId = numberAsLong(item.get("transferId"), -1L);
+            double total = numberAsDouble(item.get("totalKbits"), -1.0);
+            double moved = numberAsDouble(item.get("transferredKbits"), -1.0);
+            double remaining = numberAsDouble(item.get("remainingKbits"), -1.0);
+            boolean qualifying = Boolean.TRUE.equals(item.get("qualifyingMidTransferInterruption"));
+            boolean bytesValid = total >= 0.0 && moved > 0.0 && remaining > 0.0
+                    && moved + remaining <= total + 1.0e-6;
+            boolean unique = transferId >= 0L && contactTransferIds.add(Long.valueOf(transferId));
+            contactEvidenceConsistent = contactEvidenceConsistent && qualifying && bytesValid && unique;
+        }
+        boolean cpuObserved = Boolean.TRUE.equals(cpuConservation.get("observed"));
+        boolean cpuConserved = Boolean.TRUE.equals(cpuConservation.get("conservationSatisfied"));
+        boolean bandwidthObserved = Boolean.TRUE.equals(bandwidthConservation.get("observed"));
+        boolean bandwidthConserved = Boolean.TRUE.equals(bandwidthConservation.get("conservationSatisfied"));
+        boolean strictRuntimeValidation = !strictPhysicalClaims
+                || (cpuObserved && cpuConserved && bandwidthObserved && bandwidthConserved
+                        && transferEvidenceConsistent && contactEvidenceConsistent);
+        result.put("cpuConservation", cpuConservation);
+        result.put("bandwidthConservation", bandwidthConservation);
+        result.put("nativeTransferEvidence", transferEvidence);
+        result.put("nativeTransferEvidenceConsistent", transferEvidenceConsistent);
+        result.put("bandwidthClaimScope", "shared_lan_domain_and_global_wan");
+        result.put("perLinkBandwidthAllocationSupported", false);
+        result.put("contactInterruptionEvidence", contactEvidence);
+        result.put("nativeContactInterruptionObserved", !contactEvidence.isEmpty());
+        result.put("nativeContactInterruptionEvidenceConsistent", contactEvidenceConsistent);
+        result.put("strictRuntimeValidationPassed", strictRuntimeValidation);
+        result.put("strictRuntimeValidationFailureReason", strictRuntimeValidation ? null
+                : "missing_or_invalid_runtime_physics_evidence");
+        boolean observedSelectiveReconfiguration = false;
+        boolean observedNativeResourceActuation = false;
+        for (Map<String, Object> evidence : interventionEvidence) {
+            if (Boolean.TRUE.equals(evidence.get("accepted")) && Boolean.TRUE.equals(evidence.get("changed"))
+                    && Boolean.TRUE.equals(evidence.get("scopeInvariantSatisfied"))
+                    && evidence.get("actualChangedEntities") instanceof List
+                    && !((List<?>) evidence.get("actualChangedEntities")).isEmpty()) {
+                observedSelectiveReconfiguration = true;
+            }
+            Object volume = evidence.get("realizedReconfigurationVolume");
+            if (volume instanceof Map && ((Map<?, ?>) volume).get("nativeBindingSnapshots") instanceof Map
+                    && !((Map<?, ?>) ((Map<?, ?>) volume).get("nativeBindingSnapshots")).isEmpty()) {
+                observedNativeResourceActuation = true;
+            }
+        }
+        result.put("runtimeEvidenceCount", interventionEvidence.size());
+        result.put("observedAtRuntime", !interventionEvidence.isEmpty());
+        result.put("eligibleForSelectiveReconfigurationClaim", observedSelectiveReconfiguration);
+        result.put("eligibleForNativeResourceActuationClaim", observedNativeResourceActuation);
+        result.put("eligibleForCpuConservationClaim", cpuObserved && cpuConserved);
+        result.put("eligibleForBandwidthConservationClaim", bandwidthObserved && bandwidthConserved);
+        result.put("eligibleForMidTransferContactInterruptionClaim",
+                !contactEvidence.isEmpty() && contactEvidenceConsistent);
+        result.put("eligibleForTaskTargetMigrationClaim", false);
+        result.put("eligibleForRouteActuationClaim", false);
+        result.put("eligibleForDynamicPriorityClaim", false);
+        result.put("lastInterventionEvidence", interventionEvidence.isEmpty() ? null : interventionEvidence.get(interventionEvidence.size() - 1));
+        result.put("validationSource", "satedgesim_native_runtime");
+        result.put("containsFutureStochasticState", false);
+        return result;
+    }
+
+    private void recordProtocolEvent(String type, Map<String, Object> payload) {
+        Map<String, Object> event = new LinkedHashMap<String, Object>();
+        event.put("eventType", type);
+        event.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        event.put("worldVersion", worldVersion);
+        event.put("configurationVersion", currentConfiguration == null ? 0L : currentConfiguration.version);
+        event.put("payload", payload);
+        protocolEvents.add(event);
+        while (protocolEvents.size() > 512) protocolEvents.remove(0);
     }
 
     public synchronized Map<String, Object> dispatchUnderConfiguration(Map<String, Object> request) {
@@ -876,6 +1160,12 @@ public class SatEdgeSimSession {
                 || currentConfiguration.version != candidate.version) {
             receipt.put("accepted", false);
             receipt.put("reason", "configuration_not_active");
+            return receipt;
+        }
+        if (simulation != null && currentConfiguration.isExpired(simulation.clock())) {
+            receipt.put("accepted", false);
+            receipt.put("reason", "configuration_expired");
+            receipt.put("simTimeExpiryAuthoritative", true);
             return receipt;
         }
         Map<String, Object> taskContext = request == null || !(request.get("task") instanceof Map)
@@ -921,6 +1211,17 @@ public class SatEdgeSimSession {
                 validateResourceFields(map, reasons);
             }
             if (candidate instanceof Map) validateResourceFields((Map<?, ?>) candidate, reasons);
+        }
+    }
+
+    private void validateScalarAllocations(Map<String, Object> bindings, String dimension, List<String> reasons) {
+        if (bindings == null) return;
+        for (Object raw : bindings.values()) {
+            if (!(raw instanceof Number)) continue;
+            double value = ((Number) raw).doubleValue();
+            if (Double.isNaN(value) || Double.isInfinite(value) || value <= 0.0 || value > 1.0) {
+                reasons.add("invalid_" + dimension + "_allocation");
+            }
         }
     }
 
@@ -1036,13 +1337,23 @@ public class SatEdgeSimSession {
         monitor.status = String.valueOf(scalars.get("status"));
         double now = simulation == null ? 0.0 : simulation.clock();
         monitor.simulationTimeSec = now;
+        monitor.worldVersion = worldVersion;
         monitor.currentDecisionId = numberAsLong(scalars.get("decisionId"), -1L);
         monitor.currentTaskId = numberAsLong(scalars.get("taskId"), -1L);
         monitor.sourceDeviceId = numberAsInt(scalars.get("sourceDeviceId"), -1);
         monitor.currentConfigId = currentConfiguration == null ? null : currentConfiguration.configId;
         monitor.currentConfigVersion = currentConfiguration == null ? 0L : currentConfiguration.version;
-        if (currentConfiguration != null && Double.isFinite(configurationAppliedAtSec)) {
-            monitor.configurationAgeSec = Math.max(0.0, now - configurationAppliedAtSec);
+        if (currentConfiguration != null) {
+            double age = currentConfiguration.ageAt(now);
+            monitor.configurationAgeSec = Double.isFinite(age) ? Double.valueOf(age) : null;
+            monitor.cachedState.put("configurationExpired", currentConfiguration.isExpired(now));
+            monitor.cachedState.put("configurationCreationSimTimeSec",
+                    Double.isFinite(currentConfiguration.creationSimTimeSec) ? currentConfiguration.creationSimTimeSec : null);
+            monitor.cachedState.put("configurationLastUpdateSimTimeSec",
+                    Double.isFinite(currentConfiguration.lastUpdateSimTimeSec) ? currentConfiguration.lastUpdateSimTimeSec : null);
+            monitor.cachedState.put("configurationExpiresAtSimTimeSec",
+                    Double.isFinite(currentConfiguration.expiresAtSimTimeSec) ? currentConfiguration.expiresAtSimTimeSec : null);
+            monitor.cachedState.put("worldVersion", worldVersion);
         }
         List<Task> tasks = simulationManager == null ? null : simulationManager.getTasksList();
         populateArrivedWorkload(monitor, tasks, now);
@@ -1519,6 +1830,15 @@ public class SatEdgeSimSession {
         Map<String, Object> result = bridge.getDecisionPlaneStats();
         result.put("cheapMonitorEndpoint", "/get_monitor_state");
         result.put("plannerEndpoint", "/get_planner_state");
+        result.put("cpuConservation", RlNativeResourceBindingManager.runtimeConservationEvidence());
+        if (simulationManager != null && simulationManager.getNetworkModel() != null) {
+            result.put("bandwidthConservation", simulationManager.getNetworkModel().getBandwidthConservationEvidence());
+            result.put("nativeContactInterruptionObserved",
+                    !simulationManager.getNetworkModel().getContactInterruptionEvidence().isEmpty());
+        } else {
+            result.put("bandwidthConservation", new LinkedHashMap<String, Object>());
+            result.put("nativeContactInterruptionObserved", false);
+        }
         result.put("containsFutureStochasticState", false);
         return result;
     }
@@ -1599,11 +1919,19 @@ public class SatEdgeSimSession {
         }
         try {
             if (simulationThread != null) {
-                simulationThread.join(3000L);
+                simulationThread.join(30000L);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * Reset must not overlap two CloudSim runtimes.  The REST layer uses this
+     * barrier after close() before publishing a replacement session.
+     */
+    public boolean isSimulationThreadAlive() {
+        return simulationThread != null && simulationThread.isAlive();
     }
 
     private int clamp(int value, int min, int max) {

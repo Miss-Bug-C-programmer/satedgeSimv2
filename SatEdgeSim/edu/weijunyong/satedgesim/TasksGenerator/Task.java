@@ -25,6 +25,8 @@ public class Task extends CloudletSimple {
 	private boolean contactInterrupted = false;
 	private double contactInterruptionTime = -1.0;
 	private double contactRemainingBytes = 0.0;
+	private double contactTransferredBytes = 0.0;
+	private boolean contactInterruptionQualified = false;
 	private String contactFailureReason = "none";
 
 	public Task(int id, long cloudletLength, long pesNumber) {
@@ -134,6 +136,22 @@ public class Task extends CloudletSimple {
 
 	public void setContactRemainingBytes(double contactRemainingBytes) {
 		this.contactRemainingBytes = Math.max(0.0, contactRemainingBytes);
+	}
+
+	public double getContactTransferredBytes() {
+		return contactTransferredBytes;
+	}
+
+	public void setContactTransferredBytes(double contactTransferredBytes) {
+		this.contactTransferredBytes = Math.max(0.0, contactTransferredBytes);
+	}
+
+	public boolean isContactInterruptionQualified() {
+		return contactInterruptionQualified;
+	}
+
+	public void setContactInterruptionQualified(boolean contactInterruptionQualified) {
+		this.contactInterruptionQualified = contactInterruptionQualified;
 	}
 
 	public String getContactFailureReason() {

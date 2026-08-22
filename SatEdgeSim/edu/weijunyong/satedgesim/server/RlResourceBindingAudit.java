@@ -22,11 +22,28 @@ public final class RlResourceBindingAudit {
         out.put("native_cpu_binding_scope", RlNativeResourceBindingSemantics.CPU_BINDING_SCOPE);
         out.put("native_network_binding_scope", RlNativeResourceBindingSemantics.NETWORK_BINDING_SCOPE);
         out.put("native_tx_power_binding_scope", RlNativeResourceBindingSemantics.TX_POWER_BINDING_SCOPE);
+        out.put("requestedVsEffectiveTrace", "native_runtime_progress_evidence");
+        out.put("per_link_bandwidth_allocation_supported", false);
+        Map<String, Object> chains = new LinkedHashMap<String, Object>();
+        chains.put("cpuShare", chain("action.cpuShare", "RlNativeResourceBindingManager.vm_mips", "CloudSim VM MIPS + Cloudlet scheduler", "runtime finished-length delta"));
+        chains.put("bandwidthShare", chain("action.bandwidthShare", "FileTransferProgress.requestedBandwidthShare", "DefaultNetworkModel native transfer progression", "effective LAN/WAN allocation trace"));
+        chains.put("txPowerRatio", chain("action.txPowerRatio", "FileTransferProgress.txPowerRatioClamped", "DefaultEnergyModel wireless transmission", "native energy usage"));
+        chains.put("queuePriority", chain("action.queuePriority", "not bound", "none", "metadata only; dynamic actuation unsupported"));
+        out.put("requestedBoundEffectiveConsumer", chains);
         out.put("table5_title_suggestion", p.nativeSchedulerBound()
                 ? "SatEdgeSim native VM/network/power-bound replay"
                 : (p.estimatorBound()
                         ? "SatEdgeSim resource-aware estimator-bound replay"
                         : "SatEdgeSim candidate-level action-mapping replay"));
         return out;
+    }
+
+    private static Map<String, Object> chain(String requested, String bound, String consumer, String effective) {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("requested", requested);
+        result.put("boundTo", bound);
+        result.put("effectivePhysicalVariable", effective);
+        result.put("executionConsumer", consumer);
+        return result;
     }
 }

@@ -25,7 +25,12 @@ Implemented endpoints:
 | `/configuration/current` | GET | Active reusable configuration. |
 | `/configuration/validate` | POST | Version, target, contact and resource validation. |
 | `/configuration/apply` | POST | Apply reusable selector rules. |
+| `/configuration/patch` | POST | Apply a versioned selective native execution patch. |
+| `/intervention` | POST | Canonical alias for the selective intervention path. |
 | `/configuration/dispatch` | POST | Dispatch a pending task under an active rule. |
+| `/intervention_evidence` | GET | Query actual applied/rejected intervention evidence. |
+| `/protocol_events` | GET | Query runtime configuration protocol events. |
+| `/dynamic_validation/report` | GET | Query strict capability/runtime validation status. |
 | `/advance_world` | POST | CloudSim physical-time advancement with before/after receipt. |
 | `/debug/decision_plane_stats` | GET | Cheap/scoped/full acquisition instrumentation. |
 
@@ -34,11 +39,14 @@ Implemented endpoints:
 CloudSim/SatEdgeSim is not manually advanced one tick at a time. Instead, the simulation runs in a Java background thread and blocks inside `ExternalRLOrchestrator.findVM(...)` whenever a task needs an offloading target. Python calls `/get_state`, computes an action, then calls `/step`. This keeps the original SatEdgeSim task lifecycle, network model, mobility model, and result logging intact.
 
 Contract v2 adds a native scoped planner builder, reusable persistent execution
-rules, and CloudSim `pause(target)` based physical delay. `/advance_world`
+rules, a versioned `ExecutionConfiguration`/`ConfigurationPatch` executor, and
+CloudSim `pause(target)` based physical delay. `/advance_world`
 returns a verified before/target clock receipt and resumes the simulation after
 the receipt; it rejects calls made while an external decision is still pending.
-Mid-transfer contact enforcement is intentionally advertised as unsupported
-until the transfer path has a verified interruption receipt.
+Mid-transfer contact enforcement is advertised as unsupported until the transfer
+path has a verified qualifying interruption receipt. Target migration,
+route actuation and dynamic priority actuation are also fail-closed unsupported
+capabilities.
 
 ## Start server
 
@@ -82,7 +90,7 @@ curl -X POST http://127.0.0.1:8088/step \
 
 - MAPPO should consume `candidateVms`, `datacenters`, `task`, and `actionMask` and output `targetVmIndex`.
 - MADDPG can send `cpuShare`, `bandwidthShare`, `txPowerRatio`, and `queuePriority` through the same `/step` schema.
-- In this patch, SatEdgeSim's native VM/network schedulers still control actual CPU and bandwidth service. The continuous fields are preserved in the API contract so that a later custom resource model can bind them to VM MIPS, link bandwidth, or power allocation without changing Python-side code.
+- SatEdgeSim's native VM/cloudlet scheduler controls CPU service, and the native transfer progression controls conserved bandwidth service. `cpuShare` is a VM-scoped requested share whose effective task service is observed from Cloudlet progress; `bandwidthShare` is normalized over the active shared-LAN/global-WAN contention groups. Per-link bandwidth allocation is not claimed. `txPowerRatio` is consumed by the native wireless energy model; `queuePriority` remains metadata-only/unsupported for dynamic actuation.
 
 ## Files added
 

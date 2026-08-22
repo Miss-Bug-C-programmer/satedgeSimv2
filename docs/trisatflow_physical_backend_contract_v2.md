@@ -17,13 +17,27 @@ logging.
 | `GET /topology/current` | Current physical topology snapshot. |
 | `POST /topology/contact_plan` | Deterministic current/future contact forecast. |
 | `POST /configuration/apply` | Applies reusable execution rules after control-plane validation. |
+| `POST /configuration/patch` | Applies one versioned selective delta to the active native execution configuration. |
+| `POST /intervention` | Canonical intervention alias for `/configuration/patch`. |
 | `GET /configuration/current` | Active configuration and version. |
 | `POST /configuration/validate` | Physical target/resource/version/contact validation. |
 | `POST /configuration/dispatch` | Dispatches a current pending task under an active reusable rule. |
 | `POST /advance_world` | Advances CloudSim through `pause(target)` and resumes after the receipt. |
+| `GET /intervention_evidence` | Actual requested/applied/rejected intervention evidence. |
+| `GET /protocol_events` | Runtime protocol events for configuration and intervention application. |
+| `GET /dynamic_validation/report` | Strict capability and latest runtime validation report. |
 | `GET /debug/decision_plane_stats` | Candidate/build instrumentation. |
 
 The old scoped/budgeted planner routes are not part of the formal contract.
+
+The patch request carries `interventionId` through
+`originatingInterventionId`, `baseConfigurationVersion`, observed
+`world/control` identity, `requestedScope`, `observationScope`, exact change
+maps, `preserveResumeRecompute`, `planningDelayMetadata`, and
+`acquisitionMetadata`. The response carries `decisionStatus` (`APPLY`,
+`REJECT_STALE`, `PARTIAL_REJECT`, or `REPLAN_REQUIRED`), an `evidenceId`,
+requested/applied/rejected changes, realized scope/volume, version before and
+after, world/simulation time, and the intervention identity.
 
 ## Cheap monitor boundary
 
@@ -52,19 +66,28 @@ counts, `budgetAppliedDuringAcquisition=true`, `postFilterOnly=false`, and
 
 ## Persistent configuration
 
-`PersistentExecutionConfiguration` supports exact task overrides and reusable
-selector rules for source, application, traffic, flow, node, route, resource
-and default dimensions. `ExternalRLOrchestrator` resolves an active rule before
-requesting a new RL decision. A rule that matches later tasks therefore does
-not require a list of future task IDs. Unavailable targets are not silently
-relabelled as successful execution.
+`ExecutionConfiguration` supports task assignments, native resource
+allocations, associated persistent rules, routes/priorities as explicit
+capability-bounded fields, timestamps and provenance. `ExternalRLOrchestrator`
+resolves an active rule before requesting a new RL decision. A rule that matches
+later tasks therefore does not require a list of future task IDs. A current
+selective change is a `ConfigurationPatch`; it is not represented by deleting
+the old rule and globally rebuilding future decisions.
+
+The backend currently supports native CPU/bandwidth/power actuation, but its
+CPU scope is the existing VM-level binding semantics. Target migration, route
+actuation and dynamic priority actuation are explicitly unsupported.
 
 ## Physical time and known boundary
 
 `/advance_world` uses CloudSim's public `pause(target)` API and returns the
 actual before/target time, then resumes the simulation. It never mutates the
-clock directly. The old configuration remains active during the advance;
-TriSatFlow validates and applies the new configuration only after the receipt.
+clock directly. The receipt also contains native task finished/remaining
+workload, task-status counts, active transfer count and remaining network work
+before/after snapshots. The old configuration remains active during the
+advance; TriSatFlow validates and applies the new configuration only after the
+receipt. A control-epoch advance leaves the simulation paused only until the
+canonical validation/apply-or-reject path resumes it.
 An advance request is rejected while the simulation thread is synchronously
 waiting for an external decision; the controller must resolve that decision
 before advancing.

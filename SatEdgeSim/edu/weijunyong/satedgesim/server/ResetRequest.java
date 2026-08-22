@@ -16,6 +16,8 @@ public class ResetRequest {
     public Integer tasksGenerationRate = null;
     public Boolean waitForAllTasks = null;
     public boolean cleanOutputFolder = false;
+    /** Fail closed on unsupported physical reconfiguration by default. */
+    public boolean strictPhysicalClaims = true;
     public boolean waitForFirstDecision = true;
     public long waitTimeoutMs = 30000L;
 }

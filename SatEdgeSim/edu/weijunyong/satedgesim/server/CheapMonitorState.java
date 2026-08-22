@@ -13,6 +13,8 @@ public final class CheapMonitorState {
     public String status = "RUNNING";
     public String sessionId;
     public double simulationTimeSec;
+    /** Monotonic identity of native physical evolution since session reset. */
+    public long worldVersion;
     public String currentConfigId;
     public long currentConfigVersion;
     /** Null means that no active configuration has been applied in this session. */
@@ -67,6 +69,7 @@ public final class CheapMonitorState {
         result.put("status", status);
         result.put("sessionId", sessionId);
         result.put("simulationTimeSec", simulationTimeSec);
+        result.put("worldVersion", worldVersion);
         result.put("configId", currentConfigId);
         result.put("configVersion", currentConfigVersion);
         result.put("configurationAgeSec", configurationAgeSec);

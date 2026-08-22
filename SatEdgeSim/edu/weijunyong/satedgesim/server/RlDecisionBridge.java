@@ -47,7 +47,7 @@ public class RlDecisionBridge {
     private final Map<String, Long> fallbackReasonCounts = new LinkedHashMap<String, Long>();
     private long fullStateBuilderInvocations = 0L;
     private long candidateEvaluations = 0L;
-    private PersistentExecutionConfiguration persistentConfiguration;
+    private ExecutionConfiguration persistentConfiguration;
     private long persistentDispatchCount = 0L;
     private Map<String, Object> lastPersistentDispatch = new LinkedHashMap<String, Object>();
     private Task currentTask;
@@ -61,7 +61,7 @@ public class RlDecisionBridge {
         this.sessionId = sessionId;
     }
 
-    public void setPersistentConfiguration(PersistentExecutionConfiguration configuration) {
+    public void setPersistentConfiguration(ExecutionConfiguration configuration) {
         synchronized (lock) {
             this.persistentConfiguration = configuration;
             lock.notifyAll();
@@ -77,6 +77,12 @@ public class RlDecisionBridge {
             FeasibilityChecker checker) {
         synchronized (lock) {
             if (persistentConfiguration == null || task == null || vmList == null) {
+                return -1;
+            }
+            double simulationTime = simulationManager == null || simulationManager.getSimulation() == null
+                    ? 0.0 : simulationManager.getSimulation().clock();
+            if (persistentConfiguration.isExpired(simulationTime)) {
+                lastPersistentDispatch = persistentDispatchFailure(task, -1, "persistent_configuration_expired");
                 return -1;
             }
             Map<String, Object> taskContext = new LinkedHashMap<String, Object>();
@@ -126,8 +132,6 @@ public class RlDecisionBridge {
             RlResourceProfile resourceProfile = RlResourceProfile.fromAction(persistentAction, bindingMode);
             RlNativeResourceBindingManager.BindingSnapshot nativeBinding = RlNativeResourceBindingManager.BindingSnapshot.notRequested();
             if (resourceProfile.nativeSchedulerBound()) {
-                double simulationTime = simulationManager == null || simulationManager.getSimulation() == null
-                        ? 0.0 : simulationManager.getSimulation().clock();
                 try {
                     nativeBinding = RlNativeResourceBindingManager.bindTask(
                             task, vmList.get(selected), selected, resourceProfile, simulationTime);
