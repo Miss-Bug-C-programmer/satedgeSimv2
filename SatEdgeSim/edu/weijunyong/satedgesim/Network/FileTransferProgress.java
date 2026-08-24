@@ -20,7 +20,11 @@ public class FileTransferProgress {
 	private double currentBandwidth; // kbits/s
 	private double totalBandwidths=0; // kbits/s
 	private int bwAllocationTimes=0;
+	private double bandwidthShareRequested = 1.0;
+	private double bandwidthShareValidated = 1.0;
 	private double bandwidthShareClamped = 1.0;
+	private double txPowerRatioRequested = 1.0;
+	private double txPowerRatioValidated = 1.0;
 	private double txPowerRatioClamped = 1.0;
 	private boolean nativeNetworkBound = false;
 	private boolean nativeTxPowerBound = false;
@@ -176,16 +180,46 @@ public class FileTransferProgress {
 		return bandwidthShareClamped;
 	}
 
+	public double getBandwidthShareRequested() {
+		return bandwidthShareRequested;
+	}
+
+	public double getBandwidthShareValidated() {
+		return bandwidthShareValidated;
+	}
+
 	public void setBandwidthShareClamped(double bandwidthShareClamped) {
 		this.bandwidthShareClamped = clampShare(bandwidthShareClamped);
+		this.bandwidthShareValidated = this.bandwidthShareClamped;
+	}
+
+	public void setBandwidthShareProfile(double requested, double validated) {
+		this.bandwidthShareRequested = requested;
+		this.bandwidthShareValidated = clampShare(validated);
+		this.bandwidthShareClamped = this.bandwidthShareValidated;
 	}
 
 	public double getTxPowerRatioClamped() {
 		return txPowerRatioClamped;
 	}
 
+	public double getTxPowerRatioRequested() {
+		return txPowerRatioRequested;
+	}
+
+	public double getTxPowerRatioValidated() {
+		return txPowerRatioValidated;
+	}
+
 	public void setTxPowerRatioClamped(double txPowerRatioClamped) {
 		this.txPowerRatioClamped = clampShare(txPowerRatioClamped);
+		this.txPowerRatioValidated = this.txPowerRatioClamped;
+	}
+
+	public void setTxPowerRatioProfile(double requested, double validated) {
+		this.txPowerRatioRequested = requested;
+		this.txPowerRatioValidated = clampShare(validated);
+		this.txPowerRatioClamped = this.txPowerRatioValidated;
 	}
 
 	public boolean isNativeNetworkBound() {
@@ -360,6 +394,10 @@ public class FileTransferProgress {
 		out.put("totalBytes", getTotalBytes());
 		out.put("bytesMovedBeforeInterruption", getTransferredBytes());
 		out.put("remainingBytes", getRemainingBytes());
+		out.put("wastedKbits", 0.0);
+		out.put("failedKbits", 0.0);
+		out.put("retriedKbits", 0.0);
+		out.put("accountingBasis", "moved_plus_remaining_plus_explicit_terminal_amount");
 		out.put("byteConversion", "1_kbit=125_SI_bytes");
 		out.put("contactRequired", contactRequired);
 		out.put("contactEvidenceAvailable", contactEvidenceAvailable);
@@ -370,9 +408,15 @@ public class FileTransferProgress {
 		out.put("terminalStatus", terminalStatus == null ? "ACTIVE" : terminalStatus);
 		out.put("failureReason", contactFailureReason);
 		out.put("nativeNetworkBound", nativeNetworkBound);
-		out.put("requestedBandwidthShare", bandwidthShareClamped);
-		out.put("requestedTxPowerRatio", txPowerRatioClamped);
-		out.put("effectiveTxPowerRatio", txPowerRatioClamped);
+		out.put("requestedBandwidthShare", bandwidthShareValidated);
+		out.put("rawRequestedBandwidthShare", bandwidthShareRequested);
+		out.put("validatedRequestedBandwidthShare", bandwidthShareValidated);
+		out.put("effectiveLanBandwidthShare", lanCapacity > 0.0 ? effectiveLanBandwidth / lanCapacity : null);
+		out.put("effectiveWanBandwidthShare", wanCapacity > 0.0 ? effectiveWanBandwidth / wanCapacity : null);
+		out.put("requestedTxPowerRatio", txPowerRatioValidated);
+		out.put("rawRequestedTxPowerRatio", txPowerRatioRequested);
+		out.put("validatedRequestedTxPowerRatio", txPowerRatioValidated);
+		out.put("effectiveTxPowerRatio", txPowerRatioValidated);
 		out.put("txPowerExecutionConsumer", nativeTxPowerBound ? "DefaultEnergyModel.wireless_transmission" : "unbound");
 		out.put("effectiveLanBandwidth", effectiveLanBandwidth);
 		out.put("effectiveWanBandwidth", effectiveWanBandwidth);

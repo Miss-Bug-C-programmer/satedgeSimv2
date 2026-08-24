@@ -19,13 +19,19 @@ public class DefaultTasksGenerator extends TasksGenerator {
 		double simulationTime = simulationParameters.SIMULATION_TIME - simulationParameters.INITIALIZATION_TIME; //in seconds
 		for (int dev = 0; dev < datacentersList.size(); dev++) { // for each device
 			if (datacentersList.get(dev).getType() == TYPES.EDGE_DEVICE && datacentersList.get(dev).isGeneratingTasks()) {
-				int app = new Random().nextInt(simulationParameters.APPS_COUNT); // pickup a random application type for
+				// The REST reset seed is the authoritative exogenous-trace seed.
+				// Avoid default-seeded Random/Math.random so replay branches with
+				// the same seed receive the same task sequence.
+				long deviceSeed = simulationParameters.RL_SERVER_SEED
+						^ (0x9E3779B97F4A7C15L * (long) (dev + 1));
+				Random random = new Random(deviceSeed);
+				int app = random.nextInt(simulationParameters.APPS_COUNT); // pickup a random application type for
 				double lamda = 	simulationParameters.APPLICATIONS_TABLE[app][6];		//poisson_interarrival												// every device
 				datacentersList.get(dev).setApplication(app); // assign this application to that device
 				int time = 0;
 				while (time < simulationTime) {
 					// generating tasks
-					time += getPossionVariable(lamda);
+					time += getPossionVariable(random, lamda);
 					// Shift the time by the defined value "INITIALIZATION_TIME"
 					// in order to start after generating all the resources
 					time += simulationParameters.INITIALIZATION_TIME;
@@ -37,9 +43,9 @@ public class DefaultTasksGenerator extends TasksGenerator {
 	}
 	
 	//poisson 
-    private static int getPossionVariable(double lamda) {
+    private static int getPossionVariable(Random random, double lamda) {
 		int x = 0;
-		double y = Math.random(), cdf = getPossionProbability(x, lamda);
+		double y = random.nextDouble(), cdf = getPossionProbability(x, lamda);
 		while (cdf < y) {
 			x++;
 			cdf += getPossionProbability(x, lamda);

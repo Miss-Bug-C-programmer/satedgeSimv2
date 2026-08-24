@@ -7,6 +7,7 @@ import java.util.Map;
 
 import org.cloudbus.cloudsim.vms.Vm;
 
+import edu.weijunyong.satedgesim.Network.FileTransferProgress;
 import edu.weijunyong.satedgesim.Network.NetworkModel;
 import edu.weijunyong.satedgesim.SimulationManager.SimulationManager;
 import edu.weijunyong.satedgesim.TasksGenerator.Task;
@@ -70,9 +71,20 @@ public final class ReconfigurationExecutor {
         result.interventionId = patch.originatingInterventionId;
         result.observedWorldVersion = patch.observedWorldVersion;
         result.observedControlEpoch = patch.observedControlEpoch;
-        result.revalidatedWorldVersion = patch.revalidatedWorldVersion;
+        boolean serverReceiptAuthorized = patch.hasServerValidationReceipt();
+        result.revalidatedWorldVersion = serverReceiptAuthorized
+                ? Long.valueOf(patch.getServerValidationReceipt().validatedWorldVersion) : null;
+        result.validationReceiptId = patch.validationReceiptId;
+        result.physicalAdvanceReceiptId = patch.physicalAdvanceReceiptId;
+        result.requestedMaterialChanges = requestedMaterialChanges(patch);
+        result.operationClass = isGlobalScope(patch.requestedScope)
+                ? "GLOBAL_SCOPED_INTERVENTION" : "SELECTIVE_INTERVENTION";
         if (current == null) {
             return reject(result, "no_active_execution_configuration", false, null);
+        }
+        if (!dryRun && strictMode && patch.hasMaterialChanges() && !serverReceiptAuthorized) {
+            return reject(result, patch.validationReceiptFailureReason == null
+                    ? "missing_or_invalid_server_validation_receipt" : patch.validationReceiptFailureReason, true, null);
         }
         if (strictMode && patch.baseConfigurationVersion == null) {
             return reject(result, "missing_base_configuration_version", false, null);
@@ -88,16 +100,16 @@ public final class ReconfigurationExecutor {
         if (strictMode && patch.hasMaterialChanges() && patch.baseWorldVersion == null) {
             return reject(result, "missing_base_world_version", true, null);
         }
+        Long serverRevalidatedWorld = serverReceiptAuthorized
+                ? Long.valueOf(patch.getServerValidationReceipt().validatedWorldVersion) : null;
         if (patch.observedWorldVersion != null && patch.observedWorldVersion.longValue() != worldVersion
-                && (patch.revalidatedWorldVersion == null
-                        || patch.revalidatedWorldVersion.longValue() != worldVersion)) {
+                && (serverRevalidatedWorld == null || serverRevalidatedWorld.longValue() != worldVersion)) {
             result.staleBaseRejected = true;
             return reject(result, "stale_observed_world_version", true, null);
         }
         if (patch.baseWorldVersion != null
                 && patch.baseWorldVersion.longValue() != worldVersion
-                && (patch.revalidatedWorldVersion == null
-                        || patch.revalidatedWorldVersion.longValue() != worldVersion)) {
+                && (serverRevalidatedWorld == null || serverRevalidatedWorld.longValue() != worldVersion)) {
             result.staleBaseRejected = true;
             return reject(result, "stale_world_version", true, null);
         }
@@ -120,6 +132,8 @@ public final class ReconfigurationExecutor {
         ExecutionConfiguration candidate = current.copy();
         List<AssignmentOperation> assignments = new ArrayList<AssignmentOperation>();
         Map<String, Map<String, Object>> resourceOperations = new LinkedHashMap<String, Map<String, Object>>();
+        List<Task> nativeTouchedTasks = new ArrayList<Task>();
+        List<Vm> nativeTouchedVms = new ArrayList<Vm>();
         boolean hadRejected = false;
 
         for (Map.Entry<String, Object> entry : patch.taskAssignmentChanges.entrySet()) {
@@ -169,9 +183,12 @@ public final class ReconfigurationExecutor {
                 continue;
             }
             assignments.add(new AssignmentOperation(task, target, entry.getKey(), requested));
+            addUnique(nativeTouchedTasks, task);
+            addUnique(nativeTouchedVms, target);
+            if (task.getVm() != null && task.getVm() != Vm.NULL) addUnique(nativeTouchedVms, task.getVm());
             candidate.assignments.put(entry.getKey(), ExecutionConfiguration.deepCopy(requested));
             acceptedChange(result, "taskAssignmentChanges", entry.getKey(), requested, task);
-            addRealizedScope(result.realizedScope, "node_ids", target.getId());
+            addRealizedScope(result.realizedConfigurationScope, "node_ids", target.getId());
         }
 
         collectResourceOperations(resourceOperations, patch.resourceChanges, null);
@@ -206,7 +223,18 @@ public final class ReconfigurationExecutor {
                 rejectChange(result, "resource", key, "resource_change_must_be_object", task);
                 continue;
             }
+            List<String> missingResourceValues = mergeCurrentResourceValues(merged, current, key, task);
             merged.putAll(entry.getValue());
+            for (String field : new ArrayList<String>(missingResourceValues)) {
+                if (entry.getValue().containsKey(field)) missingResourceValues.remove(field);
+            }
+            if (!missingResourceValues.isEmpty()) {
+                hadRejected = true;
+                for (String field : missingResourceValues) {
+                    rejectChange(result, "resource", key, "MISSING_RESOURCE_VALUE:" + field, task);
+                }
+                continue;
+            }
             validateResourceMap(merged, result, key, task);
             if (hasRejectedFor(result, "resource", key)) {
                 hadRejected = true;
@@ -216,6 +244,13 @@ public final class ReconfigurationExecutor {
             if (merged.containsKey("cpuShare")) candidate.cpuAllocations.put(key, merged.get("cpuShare"));
             if (merged.containsKey("bandwidthShare")) candidate.bandwidthAllocations.put(key, merged.get("bandwidthShare"));
             acceptedChange(result, "resourceChanges", key, merged, task);
+            Vm effectiveVm = vmAfterAssignment(task, assignments);
+            if (effectiveVm == null || effectiveVm == Vm.NULL) {
+                deferredChange(result, "resourceChanges", key, "pending_native_binding");
+            } else {
+                addUnique(nativeTouchedTasks, task);
+                addUnique(nativeTouchedVms, effectiveVm);
+            }
         }
 
         for (Map.Entry<String, Object> entry : patch.routeChanges.entrySet()) {
@@ -248,6 +283,7 @@ public final class ReconfigurationExecutor {
             if (sameValue(current.reusableRules.get(entry.getKey()), entry.getValue())) continue;
             candidate.reusableRules.put(entry.getKey(), ExecutionConfiguration.deepCopy(entry.getValue()));
             acceptedChange(result, "persistentRuleChanges", entry.getKey(), entry.getValue(), null);
+            result.futureDispatchRuleChanged = true;
         }
 
         if (strictMode && hadRejected) {
@@ -261,12 +297,19 @@ public final class ReconfigurationExecutor {
             return reject(result, hadRejected ? "no_change_accepted" : "patch_not_material", false, null);
         }
 
+        RlNativeResourceBindingManager.NativeStateSnapshot nativeSnapshot = null;
+        Map<FileTransferProgress, TransferBindingState> transferSnapshot = null;
         if (!dryRun) {
+            nativeSnapshot = RlNativeResourceBindingManager.captureBeforeState(nativeTouchedTasks, nativeTouchedVms);
+            transferSnapshot = captureTransferBindingState(nativeTouchedTasks);
             try {
                 for (AssignmentOperation operation : assignments) operation.task.setVm(operation.target);
-                applyNativeResources(resourceOperations, result);
+                markNativeAssignments(assignments, result);
+                applyNativeResources(resourceOperations, candidate, assignments, result);
             } catch (RuntimeException error) {
                 for (AssignmentOperation operation : assignments) operation.task.setVm(operation.previous);
+                RlNativeResourceBindingManager.restore(nativeSnapshot);
+                restoreTransferBindingState(transferSnapshot);
                 discardTentativeApplication(result);
                 return reject(result, "native_resource_application_failed:" + error.getClass().getSimpleName(), false, null);
             }
@@ -284,6 +327,7 @@ public final class ReconfigurationExecutor {
         result.accepted = true;
         result.changed = true;
         result.decisionStatus = hadRejected ? "PARTIAL_REJECT" : "APPLY";
+        result.configurationChanged = true;
         result.resultingConfigurationVersion = candidate.version;
         result.afterConfiguration = candidate.toMap();
         result.appliedPatch.put("preserveResumeRecompute", patch.preserveResumeRecompute);
@@ -296,31 +340,52 @@ public final class ReconfigurationExecutor {
         result.realizedReconfigurationVolume.put("bytesStateTransferred", 0L);
         result.realizedReconfigurationVolume.put("taskTargetMigrationSupported", SUPPORTS_TASK_TARGET_MIGRATION);
         result.realizedReconfigurationVolume.put("nativeResourceActuation",
-                result.realizedReconfigurationVolume.get("nativeBindingSnapshots") instanceof Map);
+                result.nativeResourceActuationObserved);
         result.realizedReconfigurationVolume.put("resourceConfigurationUpdated",
                 count(result.appliedPatch, "resourceChanges") > 0);
         result.realizedReconfigurationVolume.put("dryRun", dryRun);
         result.scopeInvariantSatisfied = !hasOutOfScope(result);
+        result.realizedScope = mergeScopes(result.realizedConfigurationScope, result.realizedNativeScope);
+        result.nativeExecutionChanged = !result.nativeAppliedChanges.isEmpty();
+        result.futureDispatchRuleChanged = result.futureDispatchRuleChanged
+                || result.appliedPatch.get("persistentRuleChanges") instanceof Map;
         return result;
     }
 
-    private void applyNativeResources(Map<String, Map<String, Object>> resourceOperations, PatchApplicationResult result) {
+    private void applyNativeResources(Map<String, Map<String, Object>> resourceOperations,
+            ExecutionConfiguration candidate, List<AssignmentOperation> assignments, PatchApplicationResult result) {
         Map<String, Object> bindingReceipts = new LinkedHashMap<String, Object>();
         for (Map.Entry<String, Map<String, Object>> entry : resourceOperations.entrySet()) {
             Task task = findTask(taskKey(entry.getKey()));
             if (task == null || task.getVm() == null || task.getVm() == Vm.NULL) continue;
             int vmIndex = vms.indexOf(task.getVm());
             RlAction action = new RlAction();
-            Map<String, Object> allocation = entry.getValue();
-            action.cpuShare = number(allocation.get("cpuShare"), 1.0);
-            action.bandwidthShare = number(allocation.get("bandwidthShare"), 1.0);
-            action.txPowerRatio = number(allocation.get("txPowerRatio"), 1.0);
+            Map<String, Object> allocation = asMap(candidate.resourceAllocations.get(entry.getKey()));
+            if (allocation == null) allocation = entry.getValue();
+            action.cpuShare = number(allocation.get("cpuShare"), Double.NaN);
+            action.bandwidthShare = number(allocation.get("bandwidthShare"), Double.NaN);
+            action.txPowerRatio = number(allocation.get("txPowerRatio"), Double.NaN);
             RlResourceProfile profile = RlResourceProfile.fromAction(action, RlResourceBindingMode.native_scheduler_bound);
+            if (profile.hasInvalidNumericValue()) {
+                throw new IllegalArgumentException("invalid_resource_value");
+            }
             RlNativeResourceBindingManager.BindingSnapshot snapshot = RlNativeResourceBindingManager.rebindTask(
                     task, task.getVm(), vmIndex, profile, simulationTimeSec, simulationManager);
             bindingReceipts.put(entry.getKey(), snapshot.toMap());
+            Map<String, Object> nativeChange = new LinkedHashMap<String, Object>();
+            nativeChange.put("requested", ExecutionConfiguration.deepCopy(entry.getValue()));
+            nativeChange.put("validatedRequested", ExecutionConfiguration.deepCopy(allocation));
+            nativeChange.put("effective", snapshot.toMap());
+            result.nativeAppliedChanges.put(entry.getKey(), nativeChange);
+            result.actualChangedEntities.add("task:" + entry.getKey() + ":resourceChanges");
+            addRealizedScope(result.realizedNativeScope, "task_ids", task.getId());
+            addRealizedScope(result.realizedNativeScope, "node_ids", task.getVm().getId());
+            addRealizedScope(result.realizedNativeScope, "resource_keys", "resourceChanges:" + entry.getKey());
         }
-        if (!bindingReceipts.isEmpty()) result.realizedReconfigurationVolume.put("nativeBindingSnapshots", bindingReceipts);
+        if (!bindingReceipts.isEmpty()) {
+            result.nativeResourceActuationObserved = true;
+            result.realizedReconfigurationVolume.put("nativeBindingSnapshots", bindingReceipts);
+        }
     }
 
     private void collectResourceOperations(Map<String, Map<String, Object>> target,
@@ -349,9 +414,81 @@ public final class ReconfigurationExecutor {
             Object raw = values.get(field);
             if (raw == null) continue;
             double value = number(raw, Double.NaN);
-            if (!Double.isFinite(value) || value <= 0.0 || value > 1.0) {
-                rejectChange(result, "resource", key, "invalid_resource_value:" + field, task);
+            if (!Double.isFinite(value) || value < 0.10 || value > 1.0) {
+                rejectChange(result, "resource", key, "INVALID_RESOURCE_VALUE:" + field, task);
             }
+        }
+    }
+
+    private List<String> mergeCurrentResourceValues(Map<String, Object> target,
+            ExecutionConfiguration current, String key, Task task) {
+        List<String> missing = new ArrayList<String>();
+        if (current != null) {
+            copyConfiguredResourceValue(target, current.resourceAllocations, key, "cpuShare");
+            copyConfiguredResourceValue(target, current.resourceAllocations, key, "bandwidthShare");
+            copyConfiguredResourceValue(target, current.resourceAllocations, key, "txPowerRatio");
+            copyConfiguredResourceValue(target, current.cpuAllocations, key, "cpuShare");
+            copyConfiguredResourceValue(target, current.bandwidthAllocations, key, "bandwidthShare");
+        }
+        RlNativeResourceBindingManager.BindingSnapshot snapshot =
+                RlNativeResourceBindingManager.snapshotForTask(task);
+        if (!target.containsKey("cpuShare") && snapshot.requested) target.put("cpuShare", snapshot.cpuShare);
+        if (!target.containsKey("bandwidthShare") && snapshot.requested) target.put("bandwidthShare", snapshot.bandwidthShare);
+        if (!target.containsKey("txPowerRatio") && snapshot.requested) target.put("txPowerRatio", snapshot.txPowerRatio);
+        for (String field : new String[] {"cpuShare", "bandwidthShare", "txPowerRatio"}) {
+            if (!target.containsKey(field)) missing.add(field);
+        }
+        return missing;
+    }
+
+    private static void copyConfiguredResourceValue(Map<String, Object> target,
+            Map<String, Object> source, String key, String field) {
+        if (target.containsKey(field) || source == null) return;
+        Object raw = source.get(key);
+        if (raw instanceof Map) {
+            Map<?, ?> map = (Map<?, ?>) raw;
+            Object value = map.get(field);
+            if (value == null) {
+                value = map.get(toSnakeCase(field));
+            }
+            if (value != null) target.put(field, value);
+        } else if ("cpuShare".equals(field) || "bandwidthShare".equals(field)) {
+            if (raw != null) target.put(field, raw);
+        }
+    }
+
+    private static String toSnakeCase(String value) {
+        return value.replaceAll("([a-z])([A-Z])", "$1_$2").toLowerCase();
+    }
+
+    private Map<FileTransferProgress, TransferBindingState> captureTransferBindingState(List<Task> touchedTasks) {
+        Map<FileTransferProgress, TransferBindingState> snapshot = new LinkedHashMap<FileTransferProgress, TransferBindingState>();
+        if (networkModel == null || networkModel.getTransferProgressList() == null || touchedTasks == null) return snapshot;
+        for (FileTransferProgress transfer : networkModel.getTransferProgressList()) {
+            if (transfer == null || transfer.getTask() == null || !touchedTasks.contains(transfer.getTask())) continue;
+            snapshot.put(transfer, new TransferBindingState(
+                    transfer.getBandwidthShareRequested(),
+                    transfer.getBandwidthShareValidated(),
+                    transfer.getBandwidthShareClamped(),
+                    transfer.getTxPowerRatioRequested(),
+                    transfer.getTxPowerRatioValidated(),
+                    transfer.getTxPowerRatioClamped(),
+                    transfer.isNativeNetworkBound(),
+                    transfer.isNativeTxPowerBound()));
+        }
+        return snapshot;
+    }
+
+    private static void restoreTransferBindingState(Map<FileTransferProgress, TransferBindingState> snapshot) {
+        if (snapshot == null) return;
+        for (Map.Entry<FileTransferProgress, TransferBindingState> entry : snapshot.entrySet()) {
+            FileTransferProgress transfer = entry.getKey();
+            TransferBindingState state = entry.getValue();
+            if (transfer == null || state == null) continue;
+            transfer.setBandwidthShareProfile(state.bandwidthShareRequested, state.bandwidthShareValidated);
+            transfer.setTxPowerRatioProfile(state.txPowerRatioRequested, state.txPowerRatioValidated);
+            transfer.setNativeNetworkBound(state.nativeNetworkBound);
+            transfer.setNativeTxPowerBound(state.nativeTxPowerBound);
         }
     }
 
@@ -459,11 +596,41 @@ public final class ReconfigurationExecutor {
         if (map == null) map = new LinkedHashMap<String, Object>();
         map.put(key, ExecutionConfiguration.deepCopy(value));
         result.appliedPatch.put(category, map);
-        String entity = "task:" + key + ":" + category;
-        result.actualChangedEntities.add(entity);
-        addRealizedScope(result.realizedScope, "task_ids", key);
-        if (task != null && task.getVm() != null && task.getVm() != Vm.NULL) addRealizedScope(result.realizedScope, "node_ids", task.getVm().getId());
-        addRealizedScope(result.realizedScope, "resource_keys", category + ":" + key);
+        Map<String, Object> configuration = asMap(result.configurationAppliedChanges.get(category));
+        if (configuration == null) configuration = new LinkedHashMap<String, Object>();
+        configuration.put(key, ExecutionConfiguration.deepCopy(value));
+        result.configurationAppliedChanges.put(category, configuration);
+        addRealizedScope(result.realizedConfigurationScope, "task_ids", key);
+        if (task != null && task.getVm() != null && task.getVm() != Vm.NULL) {
+            addRealizedScope(result.realizedConfigurationScope, "node_ids", task.getVm().getId());
+        }
+        addRealizedScope(result.realizedConfigurationScope, "resource_keys", category + ":" + key);
+    }
+
+    private void markNativeAssignments(List<AssignmentOperation> assignments, PatchApplicationResult result) {
+        for (AssignmentOperation operation : assignments) {
+            String key = operation.key;
+            Map<String, Object> value = new LinkedHashMap<String, Object>();
+            value.put("taskId", operation.task.getId());
+            value.put("previousVmId", operation.previous == null || operation.previous == Vm.NULL
+                    ? null : operation.previous.getId());
+            value.put("appliedVmId", operation.target.getId());
+            Map<String, Object> applied = asMap(result.nativeAppliedChanges.get("taskAssignmentChanges"));
+            if (applied == null) applied = new LinkedHashMap<String, Object>();
+            applied.put(key, value);
+            result.nativeAppliedChanges.put("taskAssignmentChanges", applied);
+            result.nativeExecutionChanged = true;
+            result.actualChangedEntities.add("task:" + key + ":taskAssignmentChanges");
+            addRealizedScope(result.realizedNativeScope, "task_ids", operation.task.getId());
+            addRealizedScope(result.realizedNativeScope, "node_ids", operation.target.getId());
+        }
+    }
+
+    private void deferredChange(PatchApplicationResult result, String category, String key, String reason) {
+        Map<String, Object> deferred = asMap(result.deferredChanges.get(category));
+        if (deferred == null) deferred = new LinkedHashMap<String, Object>();
+        deferred.put(key, reason);
+        result.deferredChanges.put(category, deferred);
     }
 
     private void rejectChange(PatchApplicationResult result, String category, String key, String reason, Task task) {
@@ -490,6 +657,54 @@ public final class ReconfigurationExecutor {
         scope.put(key, values);
     }
 
+    private static Map<String, Object> mergeScopes(Map<String, Object> first, Map<String, Object> second) {
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        if (first != null) {
+            for (Map.Entry<String, Object> entry : first.entrySet()) result.put(entry.getKey(), ExecutionConfiguration.deepCopy(entry.getValue()));
+        }
+        if (second != null) {
+            for (Map.Entry<String, Object> entry : second.entrySet()) {
+                @SuppressWarnings("unchecked") List<Object> values = result.get(entry.getKey()) instanceof List
+                        ? (List<Object>) result.get(entry.getKey()) : new ArrayList<Object>();
+                if (entry.getValue() instanceof List) {
+                    for (Object item : (List<?>) entry.getValue()) if (!values.contains(item)) values.add(item);
+                }
+                result.put(entry.getKey(), values);
+            }
+        }
+        return result;
+    }
+
+    private static boolean isGlobalScope(Map<String, Object> scope) {
+        return scope != null && Boolean.TRUE.equals(scope.get("all"));
+    }
+
+    private static <T> void addUnique(List<T> target, T value) {
+        if (value != null && !target.contains(value)) target.add(value);
+    }
+
+    private static Vm vmAfterAssignment(Task task, List<AssignmentOperation> assignments) {
+        if (assignments != null) {
+            for (AssignmentOperation operation : assignments) {
+                if (operation.task == task) return operation.target;
+            }
+        }
+        return task == null ? null : task.getVm();
+    }
+
+    private static Map<String, Object> requestedMaterialChanges(ConfigurationPatch patch) {
+        Map<String, Object> out = new LinkedHashMap<String, Object>();
+        if (patch == null) return out;
+        if (!patch.taskAssignmentChanges.isEmpty()) out.put("taskAssignmentChanges", ExecutionConfiguration.deepCopyMap(patch.taskAssignmentChanges));
+        if (!patch.routeChanges.isEmpty()) out.put("routeChanges", ExecutionConfiguration.deepCopyMap(patch.routeChanges));
+        if (!patch.resourceChanges.isEmpty()) out.put("resourceChanges", ExecutionConfiguration.deepCopyMap(patch.resourceChanges));
+        if (!patch.cpuAllocationChanges.isEmpty()) out.put("cpuAllocationChanges", ExecutionConfiguration.deepCopyMap(patch.cpuAllocationChanges));
+        if (!patch.bandwidthAllocationChanges.isEmpty()) out.put("bandwidthAllocationChanges", ExecutionConfiguration.deepCopyMap(patch.bandwidthAllocationChanges));
+        if (!patch.priorityChanges.isEmpty()) out.put("priorityChanges", ExecutionConfiguration.deepCopyMap(patch.priorityChanges));
+        if (!patch.persistentRuleChanges.isEmpty()) out.put("persistentRuleChanges", ExecutionConfiguration.deepCopyMap(patch.persistentRuleChanges));
+        return out;
+    }
+
     private static int count(Map<String, Object> map, String key) {
         Object raw = map.get(key);
         return raw instanceof Map ? ((Map<?, ?>) raw).size() : 0;
@@ -507,6 +722,14 @@ public final class ReconfigurationExecutor {
         result.appliedPatch.clear();
         result.actualChangedEntities.clear();
         result.realizedScope.clear();
+        result.realizedConfigurationScope.clear();
+        result.realizedNativeScope.clear();
+        result.configurationAppliedChanges.clear();
+        result.nativeAppliedChanges.clear();
+        result.deferredChanges.clear();
+        result.configurationChanged = false;
+        result.nativeExecutionChanged = false;
+        result.nativeResourceActuationObserved = false;
         result.realizedReconfigurationVolume.clear();
         result.afterConfiguration = result.beforeConfiguration;
     }
@@ -534,6 +757,30 @@ public final class ReconfigurationExecutor {
             this.previous = task.getVm();
             this.key = key;
             this.assignment = assignment;
+        }
+    }
+
+    private static final class TransferBindingState {
+        final double bandwidthShareRequested;
+        final double bandwidthShareValidated;
+        final double bandwidthShare;
+        final double txPowerRatioRequested;
+        final double txPowerRatioValidated;
+        final double txPowerRatio;
+        final boolean nativeNetworkBound;
+        final boolean nativeTxPowerBound;
+
+        TransferBindingState(double bandwidthShareRequested, double bandwidthShareValidated, double bandwidthShare,
+                double txPowerRatioRequested, double txPowerRatioValidated, double txPowerRatio,
+                boolean nativeNetworkBound, boolean nativeTxPowerBound) {
+            this.bandwidthShareRequested = bandwidthShareRequested;
+            this.bandwidthShareValidated = bandwidthShareValidated;
+            this.bandwidthShare = bandwidthShare;
+            this.txPowerRatioRequested = txPowerRatioRequested;
+            this.txPowerRatioValidated = txPowerRatioValidated;
+            this.txPowerRatio = txPowerRatio;
+            this.nativeNetworkBound = nativeNetworkBound;
+            this.nativeTxPowerBound = nativeTxPowerBound;
         }
     }
 }

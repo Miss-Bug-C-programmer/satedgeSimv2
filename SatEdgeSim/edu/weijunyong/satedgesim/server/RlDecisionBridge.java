@@ -26,10 +26,9 @@ public class RlDecisionBridge {
     private boolean finished = false;
     private long decisionSequence = 0L;
     private RlState currentState;
+    private PendingDecisionContext pendingDecisionContext;
     private RlAction pendingAction;
     private Resolution pendingResolution;
-    private List<Vm> currentVmList;
-    private SimulationManager currentSimulationManager;
     private ExecutionReceipt lastExecutionReceipt;
     private RlCompletionReceipt lastCompletionReceipt;
     private final Map<Long, ExecutionReceipt> receiptCache = new LinkedHashMap<Long, ExecutionReceipt>();
@@ -50,12 +49,10 @@ public class RlDecisionBridge {
     private ExecutionConfiguration persistentConfiguration;
     private long persistentDispatchCount = 0L;
     private Map<String, Object> lastPersistentDispatch = new LinkedHashMap<String, Object>();
-    private Task currentTask;
-    private String[] currentArchitecture;
-    private List<List<Integer>> currentOrchestrationHistory;
-    private FeasibilityChecker currentChecker;
     private long scopedPlannerBuildInvocations = 0L;
     private long scopedPlannerCandidateEvaluations = 0L;
+    private Map<String, Object> lastAcquisitionEvidence = new LinkedHashMap<String, Object>();
+    private boolean legacyFullStateAccessObserved = false;
 
     public RlDecisionBridge(String sessionId) {
         this.sessionId = sessionId;
@@ -108,18 +105,15 @@ public class RlDecisionBridge {
                 }
             }
             if (selected < 0) {
-                String tier = rule.get("logicalTier") == null ? null : String.valueOf(rule.get("logicalTier"));
-                int abstractAction = number(rule.get("abstractAction"), -1);
-                for (int i = 0; i < vmList.size(); i++) {
-                    if (!checker.isFeasible(architecture, task, vmList.get(i))) continue;
-                    Orchestrator.FeasibilityInfo info = Orchestrator.evaluateOffloading(
-                            simulationManager, task, vmList.get(i), new String[0], null, i);
-                    if ((abstractAction >= 0 && info.abstractAction == abstractAction)
-                            || (tier != null && tier.equalsIgnoreCase(info.logicalTier))) {
-                        selected = i;
-                        break;
-                    }
-                }
+                // A reusable rule without a concrete VM identity must not
+                // become an unpriced full candidate acquisition.  The
+                // canonical external-decision path will create a pending
+                // context and acquire only the selected scoped state.
+                lastPersistentDispatch = persistentDispatchFailure(
+                        task, -1, "persistent_rule_requires_explicit_target_identity");
+                lastPersistentDispatch.put("selectionResolution", "identity_only_no_candidate_evaluation");
+                lastPersistentDispatch.put("candidateEvaluations", 0L);
+                return -1;
             }
             if (selected < 0 || selected >= vmList.size() || !checker.isFeasible(architecture, task, vmList.get(selected))) {
                 lastPersistentDispatch = new LinkedHashMap<String, Object>();
@@ -129,7 +123,18 @@ public class RlDecisionBridge {
             }
             RlAction persistentAction = persistentActionFromRule(rule, task, selected, vmList.get(selected));
             RlResourceBindingMode bindingMode = persistentBindingMode(rule);
+            if (bindingMode == RlResourceBindingMode.native_scheduler_bound
+                    && !hasCompleteNativeResourceProfile(rule)) {
+                lastPersistentDispatch = persistentDispatchFailure(
+                        task, selected, "partial_native_resource_profile_requires_explicit_dimensions");
+                lastPersistentDispatch.put("nativeBindingRequested", false);
+                return -1;
+            }
             RlResourceProfile resourceProfile = RlResourceProfile.fromAction(persistentAction, bindingMode);
+            if (resourceProfile.nativeSchedulerBound() && resourceProfile.hasInvalidNumericValue()) {
+                lastPersistentDispatch = persistentDispatchFailure(task, selected, "invalid_resource_value");
+                return -1;
+            }
             RlNativeResourceBindingManager.BindingSnapshot nativeBinding = RlNativeResourceBindingManager.BindingSnapshot.notRequested();
             if (resourceProfile.nativeSchedulerBound()) {
                 try {
@@ -202,6 +207,7 @@ public class RlDecisionBridge {
         Object mode = rule.get("bindingMode");
         if (mode == null) mode = rule.get("continuous_resource_binding_mode");
         if (mode == null) mode = rule.get("continuousResourceBindingMode");
+        if (mode == null && containsResourceFields(rule)) mode = "native_scheduler_bound";
         if (mode != null) action.extra.put("bindingMode", String.valueOf(mode));
         action.policyUpperActionName = "persistent_rule";
         action.abstractActionName = "persistent_rule";
@@ -212,11 +218,31 @@ public class RlDecisionBridge {
         Object raw = rule.get("bindingMode");
         if (raw == null) raw = rule.get("continuous_resource_binding_mode");
         if (raw == null) raw = rule.get("continuousResourceBindingMode");
+        if (raw == null && containsResourceFields(rule)) return RlResourceBindingMode.native_scheduler_bound;
         if (raw == null) return RlResourceBindingMode.candidate_only;
         String value = String.valueOf(raw).trim().toLowerCase();
         if ("native_scheduler_bound".equals(value)) return RlResourceBindingMode.native_scheduler_bound;
         if ("resource_aware_estimator_bound".equals(value)) return RlResourceBindingMode.resource_aware_estimator_bound;
         return RlResourceBindingMode.candidate_only;
+    }
+
+    private static boolean containsResourceFields(Map<?, ?> rule) {
+        if (rule == null) return false;
+        for (String key : new String[] {"cpuShare", "cpu_share", "bandwidthShare", "bandwidth_share",
+                "txPowerRatio", "tx_power_ratio"}) {
+            if (rule.containsKey(key)) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasCompleteNativeResourceProfile(Map<?, ?> rule) {
+        return hasAnyResourceField(rule, "cpuShare", "cpu_share")
+                && hasAnyResourceField(rule, "bandwidthShare", "bandwidth_share")
+                && hasAnyResourceField(rule, "txPowerRatio", "tx_power_ratio");
+    }
+
+    private static boolean hasAnyResourceField(Map<?, ?> rule, String first, String second) {
+        return rule != null && (rule.containsKey(first) || rule.containsKey(second));
     }
 
     private static double numberDouble(Object value, double fallback) {
@@ -276,7 +302,7 @@ public class RlDecisionBridge {
             if (closed) {
                 return fallbackVm(architecture, task, vmList, checker);
             }
-            while (!closed && currentState != null && pendingAction == null) {
+            while (!closed && pendingDecisionContext != null && pendingAction == null) {
                 try {
                     lock.wait();
                 } catch (InterruptedException e) {
@@ -287,13 +313,8 @@ public class RlDecisionBridge {
             if (closed) {
                 return fallbackVm(architecture, task, vmList, checker);
             }
-            currentTask = task;
-            currentArchitecture = architecture;
-            currentOrchestrationHistory = orchestrationHistory;
-            currentChecker = checker;
-            currentState = RlStateBuilder.build(
+            pendingDecisionContext = new PendingDecisionContext(
                     sessionId,
-                    "WAITING_FOR_ACTION",
                     nextDecisionId(),
                     simulationManager,
                     architecture,
@@ -302,14 +323,13 @@ public class RlDecisionBridge {
                     orchestrationHistory,
                     checker,
                     metrics,
-                    "waiting for /apply_action");
-            fullStateBuilderInvocations += 1L;
-            candidateEvaluations += vmList == null ? 0L : vmList.size();
-            currentVmList = vmList;
-            currentSimulationManager = simulationManager;
+                    fullStateBuilderInvocations,
+                    candidateEvaluations);
+            currentState = null;
             pendingAction = null;
             pendingResolution = null;
-            System.out.println("[RlDecisionBridge] waiting decisionId=" + currentState.decisionId + " taskId=" + currentState.taskId);
+            System.out.println("[RlDecisionBridge] waiting decisionId=" + pendingDecisionContext.decisionId
+                    + " taskId=" + (task == null ? -1L : task.getId()));
             lock.notifyAll();
 
             while (!closed && pendingResolution == null) {
@@ -326,6 +346,12 @@ public class RlDecisionBridge {
             }
 
             Resolution resolution = pendingResolution;
+            RlState decisionState = pendingDecisionContext == null ? null : pendingDecisionContext.plannerState;
+            if (decisionState == null && currentState != null) decisionState = currentState;
+            if (decisionState == null && pendingDecisionContext != null) {
+                decisionState = pendingDecisionContext.lightweightState(
+                        "WAITING_FOR_ACTION", lastMessage, metrics, lastDecision);
+            }
             Double energyBefore = readEnergyCounter(simulationManager);
             int selected = resolution.targetVmIndex;
             if (!isFeasible(selected, architecture, task, vmList, checker)) {
@@ -349,7 +375,7 @@ public class RlDecisionBridge {
                         resolution.resourceProfile,
                         simTime);
             }
-            lastExecutionReceipt = resolution.toAcceptedReceipt(currentState, energyBefore, readEnergyCounter(simulationManager));
+            lastExecutionReceipt = resolution.toAcceptedReceipt(decisionState, energyBefore, readEnergyCounter(simulationManager));
             cacheReceipt(lastExecutionReceipt);
             cacheDecisionResult(resolution, lastExecutionReceipt, simulationManager);
             lastDecision = lastExecutionReceipt.toMap();
@@ -360,14 +386,9 @@ public class RlDecisionBridge {
                     + " fallback=" + lastExecutionReceipt.fallbackReason);
 
             currentState = null;
+            pendingDecisionContext = null;
             pendingAction = null;
             pendingResolution = null;
-            currentVmList = null;
-            currentSimulationManager = null;
-            currentTask = null;
-            currentArchitecture = null;
-            currentOrchestrationHistory = null;
-            currentChecker = null;
             lock.notifyAll();
             return selected;
         }
@@ -375,15 +396,12 @@ public class RlDecisionBridge {
 
     public RlState getState() {
         synchronized (lock) {
-            if (currentState != null) {
-                currentState.message = lastMessage;
-                currentState.metrics = metrics;
-                currentState.lastDecision = lastDecision;
-                return currentState;
+            RlState state = materializeFullStateLocked("legacy_full_state_compatibility");
+            if (state == null) {
+                state = new RlState();
+                state.sessionId = sessionId;
+                state.status = finished ? "FINISHED" : (closed ? "CLOSED" : "RUNNING");
             }
-            RlState state = new RlState();
-            state.sessionId = sessionId;
-            state.status = finished ? "FINISHED" : (closed ? "CLOSED" : "RUNNING");
             state.message = lastMessage;
             state.metrics = metrics;
             state.lastDecision = lastDecision;
@@ -395,30 +413,55 @@ public class RlDecisionBridge {
         synchronized (lock) {
             numApplyActionCalls += 1L;
             if (closed) {
-                return rejectedReceipt(currentState, action, "session_closed", "session is closed");
+                return rejectedReceipt(null, action, "session_closed", "session is closed");
             }
-            if (currentState == null) {
+            if (pendingDecisionContext == null) {
                 return rejectedReceipt(null, action, "no_pending_decision", "no pending decision; call /get_state until status=WAITING_FOR_ACTION");
             }
-            long expectedDecisionId = currentState.decisionId >= 0 ? currentState.decisionId : currentState.requestId;
+            RlState decisionState = pendingDecisionContext.plannerState != null
+                    ? pendingDecisionContext.plannerState : currentState;
+            boolean persistentRuleAction = action != null
+                    && ("persistent_rule".equalsIgnoreCase(action.policyUpperActionName)
+                        || "persistent_rule".equalsIgnoreCase(action.abstractActionName));
+            if (persistentRuleAction) {
+                int selected = selectPersistentActionTarget(action, pendingDecisionContext);
+                if (selected >= 0 && selected < pendingDecisionContext.vmList.size()) {
+                    action.targetVmIndex = selected;
+                    action.targetVmId = pendingDecisionContext.vmList.get(selected).getId();
+                    action.selectedVmId = action.targetVmId;
+                }
+            }
+            if (decisionState == null && !persistentRuleAction) {
+                decisionState = materializeFullStateLocked("legacy_apply_action");
+            }
+            long expectedDecisionId = pendingDecisionContext.decisionId;
             long submittedDecisionId = action.decisionId >= 0 ? action.decisionId : action.requestId;
             if (submittedDecisionId >= 0 && submittedDecisionId != expectedDecisionId) {
-                return rejectedReceipt(currentState, action, "stale_decision_id",
+                return rejectedReceipt(decisionState, action, "stale_decision_id",
                         "decisionId mismatch: expected " + expectedDecisionId + " but got " + submittedDecisionId);
             }
-            if (currentState.taskId >= 0 && action.taskId >= 0 && action.taskId != currentState.taskId) {
-                return rejectedReceipt(currentState, action, "task_id_mismatch",
-                        "taskId mismatch: expected " + currentState.taskId + " but got " + action.taskId);
+            if (pendingDecisionContext.task != null && action.taskId >= 0
+                    && action.taskId != pendingDecisionContext.task.getId()) {
+                return rejectedReceipt(decisionState, action, "task_id_mismatch",
+                        "taskId mismatch: expected " + pendingDecisionContext.task.getId() + " but got " + action.taskId);
             }
-            Resolution resolution = resolveAction(action, currentState, currentVmList);
+            Resolution resolution = resolveAction(action, decisionState, pendingDecisionContext.vmList);
             if (!resolution.accepted) {
                 System.out.println("[RlDecisionBridge] rejected decisionId=" + expectedDecisionId
-                        + " taskId=" + currentState.taskId
+                        + " taskId=" + pendingDecisionContext.task.getId()
                         + " reason=" + resolution.fallbackReason);
-                return resolution.toRejectedReceipt(currentState, readEnergyCounter(currentSimulationManager));
+                return resolution.toRejectedReceipt(decisionState, readEnergyCounter(pendingDecisionContext.simulationManager));
+            }
+            if (resolution.resourceProfile != null
+                    && resolution.resourceProfile.nativeSchedulerBound()
+                    && resolution.resourceProfile.hasInvalidNumericValue()) {
+                resolution.accepted = false;
+                resolution.fallbackReason = "invalid_resource_value";
+                return resolution.toRejectedReceipt(decisionState,
+                        readEnergyCounter(pendingDecisionContext.simulationManager));
             }
             System.out.println("[RlDecisionBridge] submit decisionId=" + expectedDecisionId
-                    + " taskId=" + currentState.taskId
+                    + " taskId=" + pendingDecisionContext.task.getId()
                     + " policy=" + resolution.policyIntendedAction
                     + " targetVmIndex=" + resolution.targetVmIndex);
             this.pendingAction = action;
@@ -429,21 +472,21 @@ public class RlDecisionBridge {
                     lock.wait();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    return rejectedReceipt(currentState, action, "interrupted", "submitAction interrupted");
+                    return rejectedReceipt(decisionState, action, "interrupted", "submitAction interrupted");
                 }
             }
             ExecutionReceipt completedReceipt = cachedReceipt(expectedDecisionId);
             if (completedReceipt != null) {
                 return completedReceipt;
             }
-            return rejectedReceipt(currentState, action, "receipt_unavailable", "execution receipt unavailable");
+            return rejectedReceipt(decisionState, action, "receipt_unavailable", "execution receipt unavailable");
         }
     }
 
     public boolean waitForDecisionOrFinish(long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         synchronized (lock) {
-            while (!closed && !finished && currentState == null && System.currentTimeMillis() < deadline) {
+            while (!closed && !finished && pendingDecisionContext == null && System.currentTimeMillis() < deadline) {
                 try {
                     lock.wait(Math.max(1L, deadline - System.currentTimeMillis()));
                 } catch (InterruptedException e) {
@@ -451,7 +494,7 @@ public class RlDecisionBridge {
                     return false;
                 }
             }
-            return currentState != null || finished || closed;
+            return pendingDecisionContext != null || finished || closed;
         }
     }
 
@@ -467,6 +510,7 @@ public class RlDecisionBridge {
             this.metrics = metrics;
             this.finished = true;
             this.currentState = null;
+            this.pendingDecisionContext = null;
             this.pendingResolution = null;
             this.lastMessage = "simulation finished";
             lock.notifyAll();
@@ -477,6 +521,7 @@ public class RlDecisionBridge {
         synchronized (lock) {
             this.finished = true;
             this.currentState = null;
+            this.pendingDecisionContext = null;
             this.pendingResolution = null;
             this.lastMessage = "simulation failed: " + t.getMessage();
             lock.notifyAll();
@@ -486,6 +531,8 @@ public class RlDecisionBridge {
     public void close() {
         synchronized (lock) {
             closed = true;
+            pendingDecisionContext = null;
+            currentState = null;
             pendingResolution = null;
             lastMessage = "session closed";
             lock.notifyAll();
@@ -506,7 +553,28 @@ public class RlDecisionBridge {
 
     public RlState getCurrentStateSnapshot() {
         synchronized (lock) {
-            return currentState;
+            if (currentState != null) return currentState;
+            if (pendingDecisionContext != null && pendingDecisionContext.plannerState != null) {
+                return pendingDecisionContext.plannerState;
+            }
+            return pendingDecisionContext == null ? null
+                    : pendingDecisionContext.lightweightState("WAITING_FOR_ACTION", lastMessage, metrics, lastDecision);
+        }
+    }
+
+    /** Return lifecycle/task identity without materializing legacy full state. */
+    public RlState getLightweightStateSnapshot() {
+        synchronized (lock) {
+            if (pendingDecisionContext != null) {
+                return pendingDecisionContext.lightweightState("WAITING_FOR_ACTION", lastMessage, metrics, lastDecision);
+            }
+            RlState state = new RlState();
+            state.sessionId = sessionId;
+            state.status = finished ? "FINISHED" : (closed ? "CLOSED" : "RUNNING");
+            state.message = lastMessage;
+            state.metrics = metrics;
+            state.lastDecision = lastDecision;
+            return state;
         }
     }
 
@@ -517,11 +585,14 @@ public class RlDecisionBridge {
     public Map<String, Object> getCurrentDecisionScalars() {
         synchronized (lock) {
             Map<String, Object> out = new LinkedHashMap<String, Object>();
-            out.put("status", currentState == null ? (finished ? "FINISHED" : (closed ? "CLOSED" : "RUNNING")) : currentState.status);
-            out.put("decisionId", currentState == null ? -1L : currentState.decisionId);
-            out.put("taskId", currentState == null ? -1L : currentState.taskId);
-            out.put("sourceDeviceId", currentState == null ? -1 : currentState.sourceDeviceId);
-            out.put("simulationTimeSec", currentState == null ? 0.0 : currentState.simulationTime);
+            RlState state = currentState != null ? currentState
+                    : pendingDecisionContext == null ? null
+                    : pendingDecisionContext.lightweightState("WAITING_FOR_ACTION", lastMessage, metrics, lastDecision);
+            out.put("status", state == null ? (finished ? "FINISHED" : (closed ? "CLOSED" : "RUNNING")) : state.status);
+            out.put("decisionId", state == null ? -1L : state.decisionId);
+            out.put("taskId", state == null ? -1L : state.taskId);
+            out.put("sourceDeviceId", state == null ? -1 : state.sourceDeviceId);
+            out.put("simulationTimeSec", state == null ? 0.0 : state.simulationTime);
             return out;
         }
     }
@@ -536,72 +607,296 @@ public class RlDecisionBridge {
             out.put("cheapMonitorFullStateBuilderInvoked", false);
             out.put("cheapMonitorCandidateEvaluations", 0L);
             out.put("containsFutureStochasticState", false);
-            out.put("lastDecisionId", currentState == null ? -1L : currentState.decisionId);
-            out.put("lastTaskId", currentState == null ? -1L : currentState.taskId);
+            out.put("legacyFullStateAccessObserved", legacyFullStateAccessObserved);
+            out.put("lastDecisionId", pendingDecisionContext == null ? -1L : pendingDecisionContext.decisionId);
+            out.put("lastTaskId", pendingDecisionContext == null || pendingDecisionContext.task == null
+                    ? -1L : pendingDecisionContext.task.getId());
+            if (pendingDecisionContext != null) {
+                out.put("acquisition", new LinkedHashMap<String, Object>(pendingDecisionContext.lastAcquisitionEvidence));
+            } else {
+                out.put("acquisition", new LinkedHashMap<String, Object>(lastAcquisitionEvidence));
+            }
             out.put("persistentDispatchCount", persistentDispatchCount);
             out.put("lastPersistentDispatch", new LinkedHashMap<String, Object>(lastPersistentDispatch));
+            if (pendingDecisionContext != null) {
+                out.put("fullStateBuilderInvocationsBeforeDecision",
+                        pendingDecisionContext.fullStateBuilderInvocationsBeforeDecision);
+                out.put("candidateEvaluationsBeforeDecision",
+                        pendingDecisionContext.candidateEvaluationsBeforeDecision);
+                out.put("fullStateBuilderDeltaSinceDecisionContext",
+                        fullStateBuilderInvocations
+                                - pendingDecisionContext.fullStateBuilderInvocationsBeforeDecision);
+                out.put("candidateEvaluationsDeltaSinceDecisionContext",
+                        candidateEvaluations - pendingDecisionContext.candidateEvaluationsBeforeDecision);
+                out.put("legacyFullStateMaterialized", pendingDecisionContext.legacyFullStateMaterialized);
+            } else {
+                out.put("fullStateBuilderInvocationsBeforeDecision", fullStateBuilderInvocations);
+                out.put("candidateEvaluationsBeforeDecision", candidateEvaluations);
+                out.put("fullStateBuilderDeltaSinceDecisionContext", 0L);
+                out.put("candidateEvaluationsDeltaSinceDecisionContext", 0L);
+                out.put("legacyFullStateMaterialized", false);
+            }
             return out;
         }
     }
 
-    /** Acquire a planner projection before serialising the REST response. */
-    public RlState buildScopedPlannerState(Map<String, Object> scope, int maxCandidates) {
+    public Map<String, Object> getCurrentAcquisitionEvidence() {
         synchronized (lock) {
-            if (currentState == null || currentTask == null || currentVmList == null || currentSimulationManager == null) {
-                return getState();
+            return pendingDecisionContext == null
+                    ? new LinkedHashMap<String, Object>(lastAcquisitionEvidence)
+                    : new LinkedHashMap<String, Object>(pendingDecisionContext.lastAcquisitionEvidence);
+        }
+    }
+
+    /** Acquire planner state directly from the identity-only pending context. */
+    public RlState buildScopedPlannerState(Map<String, Object> scope, int maxCandidates) {
+        return buildScopedPlannerState(scope, maxCandidates, false);
+    }
+
+    public RlState buildScopedPlannerState(Map<String, Object> scope, int maxCandidates, boolean strict) {
+        synchronized (lock) {
+            PendingDecisionContext context = pendingDecisionContext;
+            if (context == null) {
+                return emptyState("NO_PENDING_DECISION", "no pending decision");
             }
-            List<Vm> selected = new ArrayList<Vm>();
+            Map<String, Object> requestedScope = scope == null
+                    ? new LinkedHashMap<String, Object>() : new LinkedHashMap<String, Object>(scope);
+            List<String> unsupported = unsupportedPreEvaluationDimensions(requestedScope);
+            if (!unsupported.isEmpty() && strict) {
+                context.lastAcquisitionEvidence = acquisitionEvidence(context, requestedScope, maxCandidates,
+                        0, 0, 0, 0, false, false, false, unsupported,
+                        "unsupported_pre_evaluation_scope_dimension");
+                context.lastAcquisitionEvidence.put("legacyFullStateAccessObserved", legacyFullStateAccessObserved);
+                lastAcquisitionEvidence = new LinkedHashMap<String, Object>(context.lastAcquisitionEvidence);
+                return context.lightweightState("REJECTED_UNSUPPORTED_SCOPE",
+                        "scope dimensions cannot be resolved before candidate evaluation: " + unsupported,
+                        metrics, lastDecision);
+            }
+            int identityCount = context.vmList == null ? 0 : context.vmList.size();
+            long acquisitionStartNanos = System.nanoTime();
+            List<Vm> scoped = new ArrayList<Vm>();
             List<Integer> originalIndices = new ArrayList<Integer>();
-            int limit = maxCandidates < 0 ? Integer.MAX_VALUE : maxCandidates;
-            for (int i = 0; i < currentVmList.size() && selected.size() < limit; i++) {
-                Vm vm = currentVmList.get(i);
-                if (!scopeMatches(scope, currentTask, vm)) continue;
-                selected.add(vm);
-                originalIndices.add(i);
+            for (int i = 0; i < identityCount; i++) {
+                Vm vm = context.vmList.get(i);
+                if (scopeMatches(requestedScope, context.task, vm)) {
+                    scoped.add(vm);
+                    originalIndices.add(Integer.valueOf(i));
+                }
             }
-            RlState scoped = RlStateBuilder.buildScoped(
+            int afterScope = scoped.size();
+            int limit = maxCandidates < 0 ? Integer.MAX_VALUE : maxCandidates;
+            if (scoped.size() > limit) {
+                scoped = new ArrayList<Vm>(scoped.subList(0, limit));
+                originalIndices = new ArrayList<Integer>(originalIndices.subList(0, limit));
+            }
+            int afterBudget = scoped.size();
+            long fullBefore = fullStateBuilderInvocations;
+            long candidateBefore = candidateEvaluations;
+            RlState result = RlStateBuilder.buildScoped(
                     sessionId,
                     "WAITING_FOR_ACTION",
-                    currentState.decisionId,
-                    currentSimulationManager,
-                    currentArchitecture,
-                    currentTask,
-                    selected,
-                    currentOrchestrationHistory,
-                    currentChecker,
+                    context.decisionId,
+                    context.simulationManager,
+                    context.architecture,
+                    context.task,
+                    scoped,
+                    originalIndices,
+                    context.orchestrationHistory,
+                    context.checker,
                     metrics,
                     "scoped planner acquisition");
-            for (int i = 0; i < scoped.candidateVms.size() && i < originalIndices.size(); i++) {
-                scoped.candidateVms.get(i).vmIndex = originalIndices.get(i);
+            candidateEvaluations += afterBudget;
+            for (int i = 0; i < result.candidateVms.size() && i < originalIndices.size(); i++) {
+                result.candidateVms.get(i).vmIndex = originalIndices.get(i).intValue();
             }
             scopedPlannerBuildInvocations += 1L;
-            scopedPlannerCandidateEvaluations += selected.size();
-            return scoped;
+            scopedPlannerCandidateEvaluations += afterBudget;
+            context.plannerState = result;
+            context.lastAcquisitionEvidence = acquisitionEvidence(context, requestedScope, maxCandidates,
+                    identityCount, afterScope, afterBudget, afterBudget,
+                    !requestedScope.isEmpty(), maxCandidates >= 0, fullBefore == fullStateBuilderInvocations,
+                    unsupported, null);
+            context.lastAcquisitionEvidence.put("candidateEvaluationsBeforePlannerRequest", candidateBefore);
+            context.lastAcquisitionEvidence.put("candidateEvaluationsAfterPlannerRequest", candidateEvaluations);
+            context.lastAcquisitionEvidence.put("candidateEvaluationsDelta", candidateEvaluations - candidateBefore);
+            context.lastAcquisitionEvidence.put("fullStateBuilderInvocationsAtPlannerRequest", fullBefore);
+            context.lastAcquisitionEvidence.put("fullStateBuilderInvocationsAfterPlannerRequest", fullStateBuilderInvocations);
+            context.lastAcquisitionEvidence.put("fullStateBuilderDeltaSinceDecisionContext",
+                    fullStateBuilderInvocations - context.fullStateBuilderInvocationsBeforeDecision);
+            context.lastAcquisitionEvidence.put("scopedPlannerBuilderInvocations", scopedPlannerBuildInvocations);
+            context.lastAcquisitionEvidence.put("serverAcquisitionLatencyMs",
+                    (System.nanoTime() - acquisitionStartNanos) / 1_000_000.0);
+            context.lastAcquisitionEvidence.put("legacyFullStateAccessObserved", legacyFullStateAccessObserved);
+            lastAcquisitionEvidence = new LinkedHashMap<String, Object>(context.lastAcquisitionEvidence);
+            return result;
         }
+    }
+
+    public RlState rejectScopedPlannerAcquisition(Map<String, Object> scope,
+            Map<String, Object> budget, List<String> unsupportedDimensions, String reason) {
+        synchronized (lock) {
+            if (pendingDecisionContext == null) return emptyState("NO_PENDING_DECISION", "no pending decision");
+            PendingDecisionContext context = pendingDecisionContext;
+            int identityCount = context.vmList == null ? 0 : context.vmList.size();
+            context.lastAcquisitionEvidence = acquisitionEvidence(context,
+                    scope == null ? new LinkedHashMap<String, Object>() : scope,
+                    -1, identityCount, 0, 0, 0, false, false, false,
+                    unsupportedDimensions, reason);
+            context.lastAcquisitionEvidence.put("requestedBudget", budget == null
+                    ? new LinkedHashMap<String, Object>() : new LinkedHashMap<String, Object>(budget));
+            context.lastAcquisitionEvidence.put("unsupportedAcquisitionDimensions", unsupportedDimensions == null
+                    ? new ArrayList<String>() : new ArrayList<String>(unsupportedDimensions));
+            context.lastAcquisitionEvidence.put("legacyFullStateAccessObserved", legacyFullStateAccessObserved);
+            lastAcquisitionEvidence = new LinkedHashMap<String, Object>(context.lastAcquisitionEvidence);
+            return context.lightweightState("REJECTED_UNSUPPORTED_ACQUISITION",
+                    reason + ": " + unsupportedDimensions, metrics, lastDecision);
+        }
+    }
+
+    private RlState materializeFullStateLocked(String reason) {
+        if (currentState != null) return currentState;
+        if (pendingDecisionContext == null) return null;
+        PendingDecisionContext context = pendingDecisionContext;
+        long acquisitionStartNanos = System.nanoTime();
+        long candidateBefore = candidateEvaluations;
+        long fullBefore = fullStateBuilderInvocations;
+        fullStateBuilderInvocations += 1L;
+        candidateEvaluations += context.vmList == null ? 0L : context.vmList.size();
+        currentState = RlStateBuilder.build(
+                context.sessionId,
+                "WAITING_FOR_ACTION",
+                context.decisionId,
+                context.simulationManager,
+                context.architecture,
+                context.task,
+                context.vmList,
+                context.orchestrationHistory,
+                context.checker,
+                metrics,
+                reason);
+        context.legacyFullStateMaterialized = true;
+        legacyFullStateAccessObserved = true;
+        context.lastAcquisitionEvidence = acquisitionEvidence(context, new LinkedHashMap<String, Object>(), -1,
+                context.vmList == null ? 0 : context.vmList.size(),
+                context.vmList == null ? 0 : context.vmList.size(),
+                context.vmList == null ? 0 : context.vmList.size(),
+                context.vmList == null ? 0 : context.vmList.size(),
+                false, false, false, new ArrayList<String>(), "legacy_full_state_materialized");
+        context.lastAcquisitionEvidence.put("legacyFullStateAccessObserved", true);
+        context.lastAcquisitionEvidence.put("candidateEvaluationsBeforePlannerRequest", candidateBefore);
+        context.lastAcquisitionEvidence.put("candidateEvaluationsAfterPlannerRequest", candidateEvaluations);
+        context.lastAcquisitionEvidence.put("candidateEvaluationsDelta", candidateEvaluations - candidateBefore);
+        context.lastAcquisitionEvidence.put("fullStateBuilderInvocationsAtPlannerRequest", fullBefore);
+        context.lastAcquisitionEvidence.put("fullStateBuilderInvocationsAfterPlannerRequest", fullStateBuilderInvocations);
+        context.lastAcquisitionEvidence.put("fullStateBuilderDeltaSinceDecisionContext",
+                fullStateBuilderInvocations - context.fullStateBuilderInvocationsBeforeDecision);
+        context.lastAcquisitionEvidence.put("scopedPlannerBuilderInvocations", scopedPlannerBuildInvocations);
+        context.lastAcquisitionEvidence.put("serverAcquisitionLatencyMs",
+                (System.nanoTime() - acquisitionStartNanos) / 1_000_000.0);
+        lastAcquisitionEvidence = new LinkedHashMap<String, Object>(context.lastAcquisitionEvidence);
+        return currentState;
+    }
+
+    private RlState emptyState(String status, String message) {
+        RlState state = new RlState();
+        state.sessionId = sessionId;
+        state.status = status;
+        state.message = message;
+        return state;
+    }
+
+    private static List<String> unsupportedPreEvaluationDimensions(Map<String, Object> scope) {
+        List<String> unsupported = new ArrayList<String>();
+        for (String key : new String[] {"link_ids", "linkIds", "route_ids", "routeIds"}) {
+            // Scope DTOs intentionally carry all dimensions.  An empty
+            // dimension is a neutral value, not a request for unsupported
+            // link/route pre-filtering; only a non-empty list is a claim that
+            // must be rejected fail-closed when identity mapping is absent.
+            Object value = scope.get(key);
+            if (value instanceof List && !((List<?>) value).isEmpty()) unsupported.add(key);
+        }
+        return unsupported;
     }
 
     private static boolean scopeMatches(Map<String, Object> scope, Task task, Vm vm) {
         if (scope == null || scope.isEmpty()) return true;
+        boolean matched = false;
         if (has(scope, "task_ids", "taskIds")) {
-            if (contains(scope, "task_ids", "taskIds", task.getId())) return true;
-            return false;
+            matched = matched || task != null && contains(scope, "task_ids", "taskIds", task.getId());
         }
         if (has(scope, "source_ids", "sourceIds")) {
-            int sourceId = task.getEdgeDevice() == null ? -1 : task.getEdgeDevice().getDeviceID();
-            if (contains(scope, "source_ids", "sourceIds", sourceId)) return true;
-            return false;
+            int sourceId = task == null || task.getEdgeDevice() == null ? -1 : task.getEdgeDevice().getDeviceID();
+            matched = matched || contains(scope, "source_ids", "sourceIds", sourceId);
         }
-        if (has(scope, "node_ids", "nodeIds") || has(scope, "resource_keys", "resourceKeys")) {
-            long vmId = vm.getId();
+        if (has(scope, "node_ids", "nodeIds")) {
+            long vmId = vm == null ? -1L : vm.getId();
+            long datacenterId = -1L;
             long deviceId = -1L;
-            if (vm.getHost() != null && vm.getHost().getDatacenter() instanceof DataCenter) {
-                deviceId = ((DataCenter) vm.getHost().getDatacenter()).getDeviceID();
+            if (vm != null && vm.getHost() != null && vm.getHost().getDatacenter() instanceof DataCenter) {
+                DataCenter dc = (DataCenter) vm.getHost().getDatacenter();
+                datacenterId = dc.getId();
+                deviceId = dc.getDeviceID();
             }
-            return contains(scope, "node_ids", "nodeIds", vmId)
-                    || contains(scope, "node_ids", "nodeIds", deviceId)
-                    || contains(scope, "resource_keys", "resourceKeys", vmId);
+            matched = matched || contains(scope, "node_ids", "nodeIds", vmId)
+                    || contains(scope, "node_ids", "nodeIds", datacenterId)
+                    || contains(scope, "node_ids", "nodeIds", deviceId);
+        }
+        if (has(scope, "resource_keys", "resourceKeys")) {
+            long vmId = vm == null ? -1L : vm.getId();
+            matched = matched || contains(scope, "resource_keys", "resourceKeys", vmId)
+                    || containsResourceVm(scope, vmId);
+        }
+        return matched;
+    }
+
+    private static boolean containsResourceVm(Map<String, Object> scope, long vmId) {
+        Object raw = scope.containsKey("resource_keys") ? scope.get("resource_keys") : scope.get("resourceKeys");
+        if (!(raw instanceof List)) return false;
+        for (Object item : (List<?>) raw) {
+            String value = String.valueOf(item);
+            if (value.equals("vm:" + vmId) || value.endsWith(":" + vmId)) return true;
         }
         return false;
+    }
+
+    private static Map<String, Object> acquisitionEvidence(PendingDecisionContext context,
+            Map<String, Object> scope, int maxCandidates, int identityCount, int afterScope,
+            int afterBudget, int evaluated, boolean scopeApplied, boolean budgetApplied,
+            boolean noFullBuilder, List<String> unsupported, String mode) {
+        Map<String, Object> out = new LinkedHashMap<String, Object>();
+        out.put("decisionId", context.decisionId);
+        out.put("decisionContextCreatedAt", context.createdWallClockMs);
+        out.put("fullStateBuilderInvocationsBeforeDecision", context.fullStateBuilderInvocationsBeforeDecision);
+        out.put("fullStateBuilderInvocationsAtPlannerRequest", context.fullStateBuilderInvocationsBeforeDecision
+                + (context.legacyFullStateMaterialized ? 1L : 0L));
+        out.put("fullStateBuilderInvocationsAfterPlannerRequest", context.legacyFullStateMaterialized
+                ? context.fullStateBuilderInvocationsBeforeDecision + 1L
+                : context.fullStateBuilderInvocationsBeforeDecision);
+        out.put("fullStateBuilderDeltaSinceDecisionContext", context.legacyFullStateMaterialized ? 1L : 0L);
+        out.put("scopedPlannerBuilderInvocations", 1L);
+        out.put("candidateEvaluationsBeforePlannerRequest", context.candidateEvaluationsBeforeDecision);
+        out.put("candidateIdentityCountBeforeScope", identityCount);
+        out.put("candidateIdentityCountAfterScope", afterScope);
+        out.put("candidateIdentityCountAfterBudget", afterBudget);
+        out.put("candidateEvaluatedCount", evaluated);
+        out.put("requestedScope", scope == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<String, Object>(scope));
+        out.put("appliedScope", scope == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<String, Object>(scope));
+        Map<String, Object> requestedBudget = new LinkedHashMap<String, Object>();
+        if (maxCandidates >= 0) requestedBudget.put("max_candidate_count", maxCandidates);
+        out.put("requestedBudget", requestedBudget);
+        out.put("appliedBudget", requestedBudget);
+        out.put("scopeRestrictionAppliedBeforeEvaluation", scopeApplied);
+        out.put("budgetRestrictionAppliedBeforeEvaluation", budgetApplied);
+        out.put("legacyFullStateMaterialized", context.legacyFullStateMaterialized);
+        out.put("legacyFullStateAccessObserved", context.legacyFullStateMaterialized);
+        out.put("readEntityKinds", java.util.Arrays.asList("current_task", "selected_candidate_identities", "selected_candidate_state", "deterministic_contact_forecast"));
+        out.put("containsFutureStochasticState", false);
+        out.put("unsupportedScopeDimensions", unsupported == null ? new ArrayList<String>() : new ArrayList<String>(unsupported));
+        out.put("mode", mode == null ? "native_scoped_candidate_acquisition" : mode);
+        out.put("scopeDimensionSupport", unsupported == null || unsupported.isEmpty());
+        out.put("scopeBudgetCausalityProven", (scopeApplied || budgetApplied)
+                && (unsupported == null || unsupported.isEmpty()) ? noFullBuilder : false);
+        return out;
     }
 
     private static boolean has(Map<String, Object> map, String first, String second) {
@@ -612,14 +907,30 @@ public class RlDecisionBridge {
         Object raw = map.containsKey(first) ? map.get(first) : map.get(second);
         if (!(raw instanceof List)) return false;
         for (Object item : (List<?>) raw) {
-            if (String.valueOf(item).equals(String.valueOf(value))) return true;
+            if (sameIdentityValue(item, value)) return true;
         }
         return false;
     }
 
+    private static boolean sameIdentityValue(Object left, Object right) {
+        if (left == null || right == null) return left == right;
+        if (left instanceof Number && right instanceof Number) {
+            return Double.compare(((Number) left).doubleValue(), ((Number) right).doubleValue()) == 0;
+        }
+        String leftText = String.valueOf(left);
+        String rightText = String.valueOf(right);
+        if (leftText.equals(rightText)) return true;
+        try {
+            return Double.compare(Double.parseDouble(leftText), Double.parseDouble(rightText)) == 0;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
+
     public int getCurrentCandidateCount() {
         synchronized (lock) {
-            return currentVmList == null ? 0 : currentVmList.size();
+            return pendingDecisionContext == null || pendingDecisionContext.vmList == null
+                    ? 0 : pendingDecisionContext.vmList.size();
         }
     }
 
@@ -648,25 +959,30 @@ public class RlDecisionBridge {
     public Map<String, Object> getCurrentDecisionDebug() {
         synchronized (lock) {
             Map<String, Object> out = new LinkedHashMap<String, Object>();
-            if (currentState == null) {
+            RlState state = pendingDecisionContext != null && pendingDecisionContext.plannerState != null
+                    ? pendingDecisionContext.plannerState
+                    : currentState != null ? currentState
+                    : pendingDecisionContext == null ? null
+                    : pendingDecisionContext.lightweightState("WAITING_FOR_ACTION", lastMessage, metrics, lastDecision);
+            if (state == null) {
                 out.put("status", "NO_PENDING_DECISION");
                 return out;
             }
             int[] counts = new int[] {0, 0, 0, 0};
-            for (RlState.VmView vm : currentState.candidateVms) {
+            for (RlState.VmView vm : state.candidateVms) {
                 if (vm != null && vm.isFeasible && vm.abstractAction >= 0 && vm.abstractAction < counts.length) {
                     counts[vm.abstractAction] += 1;
                 }
             }
-            out.put("decisionId", currentState.decisionId);
-            out.put("taskId", currentState.taskId);
-            out.put("sourceLeoId", currentState.sourceLeoId);
-            out.put("abstractActionMask", currentState.abstractActionMask);
-            out.put("abstractActionMaskVisible", currentState.abstractActionMaskVisible);
-            out.put("abstractActionMaskMobilitySafe", currentState.abstractActionMaskMobilitySafe);
-            out.put("abstractActionMaskCompletionSafe", currentState.abstractActionMaskCompletionSafe);
-            out.put("actionMaskMode", currentState.actionMaskMode);
-            out.put("minLinkSurvivalMarginSec", currentState.minLinkSurvivalMarginSec);
+            out.put("decisionId", state.decisionId);
+            out.put("taskId", state.taskId);
+            out.put("sourceLeoId", state.sourceLeoId);
+            out.put("abstractActionMask", state.abstractActionMask);
+            out.put("abstractActionMaskVisible", state.abstractActionMaskVisible);
+            out.put("abstractActionMaskMobilitySafe", state.abstractActionMaskMobilitySafe);
+            out.put("abstractActionMaskCompletionSafe", state.abstractActionMaskCompletionSafe);
+            out.put("actionMaskMode", state.actionMaskMode);
+            out.put("minLinkSurvivalMarginSec", state.minLinkSurvivalMarginSec);
             out.put("localCandidateCount", counts[Orchestrator.ACTION_LOCAL]);
             out.put("neighborCandidateCount", counts[Orchestrator.ACTION_NEIGHBOR]);
             out.put("geoCandidateCount", counts[Orchestrator.ACTION_GEO]);
@@ -784,15 +1100,24 @@ public class RlDecisionBridge {
 
     private Resolution resolveAction(RlAction action, RlState state, List<Vm> vmList) {
         Resolution resolution = new Resolution();
-        resolution.decisionId = state == null ? -1L : state.decisionId;
-        resolution.taskId = state == null ? -1L : state.taskId;
+        resolution.decisionId = state == null && pendingDecisionContext != null
+                ? pendingDecisionContext.decisionId : (state == null ? -1L : state.decisionId);
+        resolution.taskId = state == null && pendingDecisionContext != null && pendingDecisionContext.task != null
+                ? pendingDecisionContext.task.getId() : (state == null ? -1L : state.taskId);
         resolution.accepted = false;
         resolution.policyIntendedAction = policyUpperAction(action);
         resolution.policyIntendedActionName = policyUpperActionName(action);
         resolution.resourceProfile = RlResourceProfile.fromAction(action, requestedBindingMode(action));
         if (action.targetVmIndex >= 0) {
             resolution.targetVmIndex = action.targetVmIndex;
-            populateResolvedCandidate(resolution, state, action.targetVmIndex);
+            boolean persistentRuleAction = "persistent_rule".equalsIgnoreCase(action.policyUpperActionName)
+                    || "persistent_rule".equalsIgnoreCase(action.abstractActionName);
+            if (persistentRuleAction && pendingDecisionContext != null) {
+                populateResolvedCandidateFromPhysicalRuntime(resolution, pendingDecisionContext, action.targetVmIndex);
+            }
+            if (!persistentRuleAction) {
+                populateResolvedCandidate(resolution, state, stateCandidateIndexByOriginalIndex(state, action.targetVmIndex));
+            }
             applyResourceEstimate(resolution, state);
             return validateResolvedCandidate(resolution, action, state);
         }
@@ -801,7 +1126,7 @@ public class RlDecisionBridge {
             for (int i = 0; i < vmList.size(); i++) {
                 if (vmList.get(i).getId() == selectedVmId) {
                     resolution.targetVmIndex = i;
-                    populateResolvedCandidate(resolution, state, i);
+                    populateResolvedCandidate(resolution, state, stateCandidateIndexByVmId(state, selectedVmId));
                     applyResourceEstimate(resolution, state);
                     return validateResolvedCandidate(resolution, action, state);
                 }
@@ -812,6 +1137,7 @@ public class RlDecisionBridge {
         int intendedAction = policyUpperAction(action);
         if (intendedAction >= 0 && state != null) {
             int bestIndex = -1;
+            int bestStateIndex = -1;
             double bestDelay = Double.POSITIVE_INFINITY;
             for (int i = 0; i < state.candidateVms.size(); i++) {
                 RlState.VmView vm = state.candidateVms.get(i);
@@ -821,12 +1147,13 @@ public class RlDecisionBridge {
                 double estimatedDelay = adjustedCandidateDelay(vm, resolution.resourceProfile);
                 if (bestIndex < 0 || estimatedDelay < bestDelay) {
                     bestDelay = estimatedDelay;
-                    bestIndex = i;
+                    bestStateIndex = i;
+                    bestIndex = vm.vmIndex >= 0 ? vm.vmIndex : i;
                 }
             }
             resolution.targetVmIndex = bestIndex;
             if (bestIndex >= 0) {
-                populateResolvedCandidate(resolution, state, bestIndex);
+                populateResolvedCandidate(resolution, state, bestStateIndex);
                 applyResourceEstimate(resolution, state);
                 resolution.accepted = true;
             } else {
@@ -891,7 +1218,25 @@ public class RlDecisionBridge {
         resolution.handoverAvailable = vm.handoverAvailable;
         resolution.mobilityRisk = vm.mobilityRisk;
         resolution.mobilityRiskSource = vm.mobilityRiskSource;
-        resolution.selectedVmIndex = candidateIndex;
+        resolution.selectedVmIndex = vm.vmIndex >= 0 ? vm.vmIndex : candidateIndex;
+    }
+
+    private static int stateCandidateIndexByOriginalIndex(RlState state, int originalIndex) {
+        if (state == null || state.candidateVms == null) return -1;
+        for (int i = 0; i < state.candidateVms.size(); i++) {
+            RlState.VmView vm = state.candidateVms.get(i);
+            if (vm != null && (vm.vmIndex == originalIndex || (vm.vmIndex < 0 && i == originalIndex))) return i;
+        }
+        return -1;
+    }
+
+    private static int stateCandidateIndexByVmId(RlState state, long vmId) {
+        if (state == null || state.candidateVms == null) return -1;
+        for (int i = 0; i < state.candidateVms.size(); i++) {
+            RlState.VmView vm = state.candidateVms.get(i);
+            if (vm != null && vm.vmId == vmId) return i;
+        }
+        return -1;
     }
 
     private static class Resolution {
@@ -1106,7 +1451,10 @@ public class RlDecisionBridge {
             return resolution;
         }
         int intendedAction = policyUpperAction(action);
-        if (intendedAction >= 0 && !actionVisible(state, intendedAction)) {
+        boolean persistentRuleAction = action != null
+                && ("persistent_rule".equalsIgnoreCase(action.policyUpperActionName)
+                    || "persistent_rule".equalsIgnoreCase(action.abstractActionName));
+        if (!persistentRuleAction && state != null && intendedAction >= 0 && !actionVisible(state, intendedAction)) {
             resolution.fallbackReason = "action_not_visible";
             return resolution;
         }
@@ -1117,6 +1465,60 @@ public class RlDecisionBridge {
         resolution.accepted = true;
         resolution.fallbackReason = "none";
         return resolution;
+    }
+
+    /** Resolve a persistent action using runtime identity/feasibility only. */
+    private int selectPersistentActionTarget(RlAction action, PendingDecisionContext context) {
+        if (context == null || context.vmList == null || context.task == null) return -1;
+        if (action.targetVmIndex >= 0 && action.targetVmIndex < context.vmList.size()
+                && context.checker.isFeasible(context.architecture, context.task, context.vmList.get(action.targetVmIndex))) {
+            return action.targetVmIndex;
+        }
+        long selectedVmId = action.selectedVmId >= 0 ? action.selectedVmId : action.targetVmId;
+        if (selectedVmId >= 0) {
+            for (int i = 0; i < context.vmList.size(); i++) {
+                if (context.vmList.get(i).getId() == selectedVmId
+                        && context.checker.isFeasible(context.architecture, context.task, context.vmList.get(i))) {
+                    return i;
+                }
+            }
+        }
+        // Do not resolve an abstract persistent action by evaluating every VM.
+        // Without an explicit VM identity the request must be handled by the
+        // normal scoped acquisition/decision path.
+        return -1;
+    }
+
+    /** Populate the execution receipt from one selected native candidate. */
+    private void populateResolvedCandidateFromPhysicalRuntime(
+            Resolution resolution, PendingDecisionContext context, int selectedIndex) {
+        if (resolution == null || context == null || context.task == null
+                || context.vmList == null || selectedIndex < 0 || selectedIndex >= context.vmList.size()) return;
+        Vm vm = context.vmList.get(selectedIndex);
+        Orchestrator.FeasibilityInfo info = Orchestrator.evaluateOffloading(
+                context.simulationManager, context.task, vm, context.architecture,
+                context.orchestrationHistory, selectedIndex);
+        resolution.selectedVmId = vm.getId();
+        resolution.selectedVmIndex = selectedIndex;
+        resolution.selectedLogicalTier = info.logicalTier;
+        resolution.selectedAbstractAction = info.abstractAction;
+        resolution.selectedDelay = Math.max(0.0, info.estimatedTotalDelaySec);
+        resolution.selectedQueueLength = Math.max(0, info.estimatedQueueLength);
+        resolution.selectedRateMbps = Math.max(0.0, info.estimatedTransmissionRateMbps);
+        resolution.selectedComputeCapacity = Math.max(0.0, info.estimatedComputeCapacity);
+        resolution.selectedPropagationDelaySec = Math.max(0.0, info.propagationDelaySec);
+        resolution.selectedLocalToSource = info.isLocalToSource;
+        resolution.linkAvailableNow = info.linkAvailableNow;
+        resolution.estimatedLinkLifetimeSec = Math.max(0.0, info.estimatedLinkLifetimeSec);
+        resolution.estimatedTaskTransmissionTimeSec = Math.max(0.0, info.estimatedTaskTransmissionTimeSec);
+        resolution.estimatedTaskComputeTimeSec = Math.max(0.0, info.estimatedTaskComputeTimeSec);
+        resolution.estimatedTaskCompletionTimeSec = Math.max(0.0, info.estimatedTaskCompletionTimeSec);
+        resolution.linkSurvivalMarginSec = info.linkSurvivalMarginSec;
+        resolution.linkSurvivalMarginToCompletionSec = info.linkSurvivalMarginToCompletionSec;
+        resolution.handoverRequired = info.handoverRequired;
+        resolution.handoverAvailable = info.handoverAvailable;
+        resolution.mobilityRisk = info.mobilityRisk;
+        resolution.mobilityRiskSource = info.mobilityRiskSource;
     }
 
     private int policyUpperAction(RlAction action) {
@@ -1254,7 +1656,8 @@ public class RlDecisionBridge {
         resolution.policyIntendedAction = policyUpperAction(action);
         resolution.policyIntendedActionName = policyUpperActionName(action);
         resolution.fallbackReason = fallbackReason;
-        ExecutionReceipt receipt = resolution.toRejectedReceipt(state, readEnergyCounter(currentSimulationManager));
+        ExecutionReceipt receipt = resolution.toRejectedReceipt(state,
+                readEnergyCounter(pendingDecisionContext == null ? null : pendingDecisionContext.simulationManager));
         receipt.message = message;
         return receipt;
     }

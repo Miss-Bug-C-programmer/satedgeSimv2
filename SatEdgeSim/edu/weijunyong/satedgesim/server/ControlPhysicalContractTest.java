@@ -19,6 +19,25 @@ public class ControlPhysicalContractTest {
         require(Boolean.TRUE.equals(capabilities.get("supportsControlMonitoringEpoch")), "control monitoring epoch capability");
         require(Boolean.TRUE.equals(capabilities.get("supportsControlEpochResume")), "control epoch resume capability");
         require("cloudsim_pause_at_control_epoch_v1".equals(capabilities.get("physicalDecisionDelaySemanticsVersion")), "control epoch delay semantics");
+        require(Arrays.asList("max_candidate_count").equals(capabilities.get("supportedAcquisitionBudgetDimensions")),
+                "only consumed acquisition budget may be advertised");
+        require(!((java.util.List<?>) capabilities.get("supportedAcquisitionBudgetDimensions")).contains("max_compute_budget"),
+                "planner compute budget must not be advertised as backend acquisition budget");
+
+        Map<String, Object> noRuntimeEvidence = new LinkedHashMap<String, Object>();
+        noRuntimeEvidence.put("cpuConservation", new LinkedHashMap<String, Object>());
+        noRuntimeEvidence.put("bandwidthConservation", new LinkedHashMap<String, Object>());
+        Map<String, Object> noEvidenceCapabilities = ControlPhysicalContract.capabilities(true, noRuntimeEvidence);
+        require(Boolean.FALSE.equals(noEvidenceCapabilities.get("supportsCpuConservationEvidence")),
+                "empty CPU evidence must not claim support");
+        require(Boolean.FALSE.equals(noEvidenceCapabilities.get("supportsBandwidthConservationEvidence")),
+                "empty bandwidth evidence must not claim support");
+        require(Boolean.FALSE.equals(noEvidenceCapabilities.get("publicationEligibleForCpuConservation")),
+                "missing CPU observation must fail publication eligibility");
+        require(Boolean.TRUE.equals(capabilities.get("requiresServerValidationReceiptForStrictPatch")),
+                "strict patch must require server validation receipt");
+        require(Boolean.TRUE.equals(capabilities.get("supportsAtomicPatchTransaction")),
+                "atomic patch transaction capability");
 
         PersistentExecutionConfiguration configuration = new PersistentExecutionConfiguration();
         configuration.configId = "cfg";

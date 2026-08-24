@@ -34,6 +34,21 @@ public final class PatchApplicationResult {
     public Map<String, Object> beforeConfiguration = new LinkedHashMap<String, Object>();
     public Map<String, Object> afterConfiguration = new LinkedHashMap<String, Object>();
     public String rejectionReason;
+    public String operationClass = "SELECTIVE_INTERVENTION";
+    public boolean configurationChanged = false;
+    public boolean nativeExecutionChanged = false;
+    public boolean nativeResourceActuationObserved = false;
+    public boolean futureDispatchRuleChanged = false;
+    public boolean ruleEffectiveAtRuntime = false;
+    public boolean validatedAfterPhysicalAdvance = false;
+    public String validationReceiptId;
+    public String physicalAdvanceReceiptId;
+    public Map<String, Object> requestedMaterialChanges = new LinkedHashMap<String, Object>();
+    public Map<String, Object> configurationAppliedChanges = new LinkedHashMap<String, Object>();
+    public Map<String, Object> nativeAppliedChanges = new LinkedHashMap<String, Object>();
+    public Map<String, Object> deferredChanges = new LinkedHashMap<String, Object>();
+    public Map<String, Object> realizedConfigurationScope = new LinkedHashMap<String, Object>();
+    public Map<String, Object> realizedNativeScope = new LinkedHashMap<String, Object>();
 
     public Map<String, Object> toMap() {
         Map<String, Object> result = new LinkedHashMap<String, Object>();
@@ -77,6 +92,21 @@ public final class PatchApplicationResult {
         result.put("beforeConfiguration", beforeConfiguration);
         result.put("afterConfiguration", afterConfiguration);
         result.put("rejectionReason", rejectionReason);
+        result.put("operationClass", operationClass);
+        result.put("configurationChanged", configurationChanged);
+        result.put("nativeExecutionChanged", nativeExecutionChanged);
+        result.put("nativeResourceActuationObserved", nativeResourceActuationObserved);
+        result.put("futureDispatchRuleChanged", futureDispatchRuleChanged);
+        result.put("ruleEffectiveAtRuntime", ruleEffectiveAtRuntime);
+        result.put("validatedAfterPhysicalAdvance", validatedAfterPhysicalAdvance);
+        result.put("validationReceiptId", validationReceiptId);
+        result.put("physicalAdvanceReceiptId", physicalAdvanceReceiptId);
+        result.put("requestedMaterialChanges", requestedMaterialChanges);
+        result.put("configurationAppliedChanges", configurationAppliedChanges);
+        result.put("nativeAppliedChanges", nativeAppliedChanges);
+        result.put("deferredChanges", deferredChanges);
+        result.put("realizedConfigurationScope", realizedConfigurationScope);
+        result.put("realizedNativeScope", realizedNativeScope);
         return result;
     }
 

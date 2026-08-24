@@ -16,11 +16,11 @@ logging.
 | `GET /get_planner_state` | Legacy/full compatibility only. |
 | `GET /topology/current` | Current physical topology snapshot. |
 | `POST /topology/contact_plan` | Deterministic current/future contact forecast. |
-| `POST /configuration/apply` | Applies reusable execution rules after control-plane validation. |
+| `POST /configuration/apply` | Bootstrap or exact idempotent reusable-rule installation; strict active material changes are rejected. |
 | `POST /configuration/patch` | Applies one versioned selective delta to the active native execution configuration. |
 | `POST /intervention` | Canonical intervention alias for `/configuration/patch`. |
 | `GET /configuration/current` | Active configuration and version. |
-| `POST /configuration/validate` | Physical target/resource/version/contact validation. |
+| `POST /configuration/validate` | Patch validation and server-issued `ValidationReceipt` creation. |
 | `POST /configuration/dispatch` | Dispatches a current pending task under an active reusable rule. |
 | `POST /advance_world` | Advances CloudSim through `pause(target)` and resumes after the receipt. |
 | `GET /intervention_evidence` | Actual requested/applied/rejected intervention evidence. |
@@ -34,10 +34,26 @@ The patch request carries `interventionId` through
 `originatingInterventionId`, `baseConfigurationVersion`, observed
 `world/control` identity, `requestedScope`, `observationScope`, exact change
 maps, `preserveResumeRecompute`, `planningDelayMetadata`, and
-`acquisitionMetadata`. The response carries `decisionStatus` (`APPLY`,
+`acquisitionMetadata`, and `acquisitionEpoch`. The validation request and
+the subsequent patch request must carry the same values because the server
+receipt digest covers the complete intent. Empty scope dimensions are neutral;
+only non-empty unsupported link/route dimensions are rejected. The response
+carries `decisionStatus` (`APPLY`,
 `REJECT_STALE`, `PARTIAL_REJECT`, or `REPLAN_REQUIRED`), an `evidenceId`,
 requested/applied/rejected changes, realized scope/volume, version before and
 after, world/simulation time, and the intervention identity.
+
+Strict publication patch application requires a server-owned validation
+receipt. Its digest covers the exact patch intent, including assignments,
+resource dimensions, scope, semantics and provenance. The receipt is single-use
+and binds the current control-state identity and a server-issued physical
+advance receipt; client-supplied `revalidatedWorldVersion` is observational
+metadata only.
+
+`PatchApplicationResult` separates `configurationAppliedChanges`,
+`nativeAppliedChanges`, `deferredChanges` and `rejectedChanges`, with distinct
+configuration/native realized scopes. Native application is transactional and
+restores touched VM/binding state if a later native operation fails.
 
 ## Cheap monitor boundary
 
@@ -57,12 +73,26 @@ datacenterEnumeration=aggregate_count_only
 
 ## Planner acquisition
 
-The POST route filters the VM list before invoking `RlStateBuilder.buildScoped`.
-The scoped builder omits dense source summaries and the all-datacenter table;
-candidate `vmIndex` values are remapped to the authoritative original action
-indices. Receipts expose requested/applied scope and budget, before/after
-counts, `budgetAppliedDuringAcquisition=true`, `postFilterOnly=false`, and
-`scopedPlannerCandidateEvaluations`.
+The native decision point stores a lightweight `PendingDecisionContext`; it
+does not invoke `RlStateBuilder.build` or evaluate all candidates. The POST
+route filters VM identities and applies `max_candidate_count` before invoking
+`RlStateBuilder.buildScoped`. The scoped builder therefore evaluates only the
+retained candidates and omits dense source summaries and the all-datacenter
+table; candidate `vmIndex` values are remapped to the authoritative original
+action indices. Receipts expose requested/applied scope and budget, before/after
+counts, `candidateEvaluationsDelta`, `fullStateBuilderDeltaSinceDecisionContext`,
+`scopeRestrictionAppliedBeforeEvaluation`, `budgetRestrictionAppliedBeforeEvaluation`,
+and `scopedPlannerCandidateEvaluations`.
+
+GET `/get_state`, GET `/get_planner_state`, and the explicitly named legacy
+configuration-viability report may materialize the full state for compatibility.
+They set `legacyFullStateAccessObserved=true`; a later scoped response remains
+usable for debugging but is not publication-eligible for selective acquisition.
+
+The backend acquisition contract currently supports only
+`max_candidate_count`. Planner compute/time budgets and coordination-byte
+budgets are separate declarations and are not claimed as backend acquisition
+consumers.
 
 ## Persistent configuration
 

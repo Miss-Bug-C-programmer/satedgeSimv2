@@ -16,6 +16,7 @@ Implemented endpoints:
 | `/get_metrics` | GET | Return current aggregate metrics from `SimLog`. |
 | `/close` | POST | Close the active session. |
 | `/health` | GET | Server health check. |
+| `/version` | GET | Runtime simulator/API/settings provenance used by preflight and deterministic trace manifests. Missing git/settings provenance is reported as unknown/missing and is not publication-eligible. |
 | `/capabilities` | GET | Contract v2 capability declaration. |
 | `/get_monitor_state` | GET | Bounded cheap monitor with zero candidate evaluation. |
 | `/get_planner_state` | POST | Unified scoped/budgeted planner acquisition. |
@@ -47,6 +48,23 @@ Mid-transfer contact enforcement is advertised as unsupported until the transfer
 path has a verified qualifying interruption receipt. Target migration,
 route actuation and dynamic priority actuation are also fail-closed unsupported
 capabilities.
+
+The decision bridge now creates an identity-only `PendingDecisionContext` at
+the native orchestration wait point. It does not build `RlState` or evaluate
+all VMs there. POST `/get_planner_state` applies identity scope and the
+supported acquisition budget (`max_candidate_count`) before calling the
+scoped builder. GET `/get_state` and GET `/get_planner_state` are explicit
+`legacy_full_state_compatibility` paths; their lifecycle evidence marks the
+run as contaminated for selective-acquisition publication claims.
+
+Strict publication intervention uses `/configuration/validate` followed by
+`/configuration/patch`. Validation returns a server-owned single-use receipt
+bound to the exact patch digest, scope, configuration/world identity and the
+physical-advance receipt. `/configuration/apply` is bootstrap/idempotent-only
+when an active configuration exists; material changes are rejected with
+`material_update_requires_configuration_patch`. Patch evidence distinguishes
+configuration changes, immediate native changes, deferred unassigned-task
+resource intent and rejected changes.
 
 ## Start server
 

@@ -3,6 +3,7 @@ package edu.weijunyong.satedgesim.TasksOrchestration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 
 import org.cloudbus.cloudsim.vms.Vm;
 
@@ -218,9 +219,12 @@ public class DefaultEdgeOrchestrator extends Orchestrator {
 		List<Vm> vmList = simulationManager.getServersManager().getVmList();
 		int vm = -1;
 		int RandomCount = 0; // random time;
+		// Keep RANDOM_VM reproducible across deterministic replay branches.
+		Random random = new Random(simulationParameters.RL_SERVER_SEED
+				^ (0xD1B54A32D192ED03L * (long) (task == null ? 0 : task.getId() + 1)));
 		// get random vm for this task
 		while(RandomCount<orchestrationHistory.size()) {
-			double d = Math.random();
+			double d = random.nextDouble();
 			int index = (int)(d*(orchestrationHistory.size()-1));
 			if (offloadingIsPossible(task, vmList.get(index), architecture)) {
 				vm = index;

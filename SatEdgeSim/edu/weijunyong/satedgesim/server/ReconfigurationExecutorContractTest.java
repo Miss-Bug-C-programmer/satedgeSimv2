@@ -95,12 +95,29 @@ public final class ReconfigurationExecutorContractTest {
         PatchApplicationResult t7 = executor.apply(configuration, stale, true);
         require(!t7.accepted && t7.staleBaseRejected, "T7 stale base must be rejected by canonical executor");
 
-        ConfigurationPatch staleObservedWorld = patch(configuration.version, scopeTasks(2L));
+        ConfigurationPatch staleObservedWorld = new ConfigurationPatch();
+        staleObservedWorld.baseConfigurationVersion = Long.valueOf(configuration.version);
+        staleObservedWorld.baseWorldVersion = Long.valueOf(4L);
+        staleObservedWorld.requestedScope.putAll(scopeTasks(2L));
+        staleObservedWorld.originatingInterventionId = "contract-test";
         staleObservedWorld.observedWorldVersion = Long.valueOf(0L);
         staleObservedWorld.resourceChanges.put("2", resource(0.2));
         PatchApplicationResult t7b = executor.apply(configuration, staleObservedWorld, true);
-        require(!t7b.accepted && t7b.staleBaseRejected,
-                "T7b stale observed world must be rejected by canonical executor");
+        require(!t7b.accepted && "missing_or_invalid_server_validation_receipt".equals(t7b.rejectionReason),
+                "T7b stale observed world must be rejected by canonical executor: " + t7b.toMap());
+
+        ConfigurationPatch forgedReceipt = new ConfigurationPatch();
+        forgedReceipt.baseConfigurationVersion = Long.valueOf(configuration.version);
+        forgedReceipt.baseWorldVersion = Long.valueOf(4L);
+        forgedReceipt.observedWorldVersion = Long.valueOf(4L);
+        forgedReceipt.validationReceiptId = "caller-forged";
+        forgedReceipt.serverValidationReceiptVerified = true;
+        forgedReceipt.serverValidatedWorldVersion = Long.valueOf(4L);
+        forgedReceipt.requestedScope.putAll(scopeTasks(2L));
+        forgedReceipt.resourceChanges.put("2", resource(0.25));
+        PatchApplicationResult t7c = executor.apply(configuration, forgedReceipt, true);
+        require(!t7c.accepted && "missing_or_invalid_server_validation_receipt".equals(t7c.rejectionReason),
+                "T7c caller-supplied validation booleans must not authorize strict apply: " + t7c.toMap());
 
         ConfigurationPatch evidencePatch = patch(configuration.version, scopeTasks(2L));
         evidencePatch.resourceChanges.put("2", resource(0.3));
@@ -141,8 +158,13 @@ public final class ReconfigurationExecutorContractTest {
         ConfigurationPatch patch = new ConfigurationPatch();
         patch.baseConfigurationVersion = Long.valueOf(version);
         patch.baseWorldVersion = Long.valueOf(4L);
+        patch.validationReceiptId = "contract-receipt";
         patch.requestedScope.putAll(scope);
         patch.originatingInterventionId = "contract-test";
+        patch.attachServerValidationReceipt(new ValidationReceipt(
+                "contract-receipt", "contract-session", "contract-test",
+                version, 4L, 4L, 1L, "world", "scope", "patch", "advance",
+                0.0, 0L, Long.MAX_VALUE, true, false));
         return patch;
     }
 

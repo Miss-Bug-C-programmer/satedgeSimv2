@@ -109,7 +109,7 @@ public class ExecutionReceipt {
         out.put("taskSucceeded", taskSucceeded);
         out.put("decisionId", decisionId);
         out.put("taskId", taskId);
-        out.put("simulationTime", simulationTime);
+        out.put("simulationTime", finiteOrNull(simulationTime));
         out.put("policyUpperAction", policyUpperAction);
         out.put("policyUpperActionName", policyUpperActionName);
         out.put("selectedVmIndex", selectedVmIndex);
@@ -122,7 +122,7 @@ public class ExecutionReceipt {
         out.put("executedAbstractAction", executedAbstractAction);
         out.put("intentExecutionMatch", intentExecutionMatch);
         out.put("fallbackReason", fallbackReason);
-        out.put("delay", delay);
+        out.put("delay", finiteOrNull(delay));
         out.put("energyRawCounterBefore", energyRawCounterBefore);
         out.put("energyRawCounterAfter", energyRawCounterAfter);
         out.put("energyDelta", energyDelta);
@@ -154,15 +154,15 @@ public class ExecutionReceipt {
         out.put("native_network_bandwidth_bound", nativeNetworkBandwidthBound);
         out.put("nativeTxPowerBound", nativeTxPowerBound);
         out.put("native_tx_power_bound", nativeTxPowerBound);
-        out.put("nativeBaseMips", nativeBaseMips);
+        out.put("nativeBaseMips", finiteOrNull(nativeBaseMips));
         out.put("native_base_mips", nativeBaseMips);
-        out.put("nativeAppliedMips", nativeAppliedMips);
+        out.put("nativeAppliedMips", finiteOrNull(nativeAppliedMips));
         out.put("native_applied_mips", nativeAppliedMips);
-        out.put("nativeCpuShare", nativeCpuShare);
+        out.put("nativeCpuShare", finiteOrNull(nativeCpuShare));
         out.put("native_cpu_share", nativeCpuShare);
-        out.put("nativeBandwidthShare", nativeBandwidthShare);
+        out.put("nativeBandwidthShare", finiteOrNull(nativeBandwidthShare));
         out.put("native_bandwidth_share", nativeBandwidthShare);
-        out.put("nativeTxPowerRatio", nativeTxPowerRatio);
+        out.put("nativeTxPowerRatio", finiteOrNull(nativeTxPowerRatio));
         out.put("native_tx_power_ratio", nativeTxPowerRatio);
         out.put("nativeCpuBindingScope", nativeCpuBindingScope);
         out.put("native_cpu_binding_scope", nativeCpuBindingScope);
@@ -172,11 +172,11 @@ public class ExecutionReceipt {
         out.put("native_tx_power_binding_scope", nativeTxPowerBindingScope);
         out.put("nativeBinding", nativeBinding);
         out.put("native_binding", nativeBinding);
-        out.put("estimatorExpectedDelaySec", estimatorExpectedDelaySec);
-        out.put("estimatorExpectedEnergyJ", estimatorExpectedEnergyJ);
-        out.put("estimatorEffectiveMips", estimatorEffectiveMips);
-        out.put("estimatorEffectiveBandwidthMbps", estimatorEffectiveBandwidthMbps);
-        out.put("estimatorTxPowerW", estimatorTxPowerW);
+        out.put("estimatorExpectedDelaySec", finiteOrNull(estimatorExpectedDelaySec));
+        out.put("estimatorExpectedEnergyJ", finiteOrNull(estimatorExpectedEnergyJ));
+        out.put("estimatorEffectiveMips", finiteOrNull(estimatorEffectiveMips));
+        out.put("estimatorEffectiveBandwidthMbps", finiteOrNull(estimatorEffectiveBandwidthMbps));
+        out.put("estimatorTxPowerW", finiteOrNull(estimatorTxPowerW));
         out.put("success", success);
         out.put("failureReason", failureReason);
         out.put("deadlineMiss", deadlineMiss);
@@ -189,28 +189,33 @@ public class ExecutionReceipt {
         out.put("latencyExceeded", latencyExceeded);
         out.put("resourceExceeded", resourceExceeded);
         out.put("unknownFailure", unknownFailure);
-        out.put("deadline", deadline);
+        out.put("deadline", finiteOrNull(deadline));
         out.put("queueLength", queueLength);
-        out.put("estimatedTotalDelaySec", estimatedTotalDelaySec);
-        out.put("estimatedQueueLength", estimatedQueueLength);
-        out.put("estimatedTransmissionRateMbps", estimatedTransmissionRateMbps);
-        out.put("estimatedComputeCapacity", estimatedComputeCapacity);
+        out.put("estimatedTotalDelaySec", finiteOrNull(estimatedTotalDelaySec));
+        out.put("estimatedQueueLength", finiteOrNull(estimatedQueueLength));
+        out.put("estimatedTransmissionRateMbps", finiteOrNull(estimatedTransmissionRateMbps));
+        out.put("estimatedComputeCapacity", finiteOrNull(estimatedComputeCapacity));
         out.put("linkAvailableNow", linkAvailableNow);
-        out.put("estimatedLinkLifetimeSec", estimatedLinkLifetimeSec);
-        out.put("estimatedTaskTransmissionTimeSec", estimatedTaskTransmissionTimeSec);
-        out.put("estimatedTaskComputeTimeSec", estimatedTaskComputeTimeSec);
-        out.put("estimatedTaskCompletionTimeSec", estimatedTaskCompletionTimeSec);
-        out.put("linkSurvivalMarginSec", linkSurvivalMarginSec);
-        out.put("linkSurvivalMarginToCompletionSec", linkSurvivalMarginToCompletionSec);
+        out.put("estimatedLinkLifetimeSec", finiteOrNull(estimatedLinkLifetimeSec));
+        out.put("estimatedTaskTransmissionTimeSec", finiteOrNull(estimatedTaskTransmissionTimeSec));
+        out.put("estimatedTaskComputeTimeSec", finiteOrNull(estimatedTaskComputeTimeSec));
+        out.put("estimatedTaskCompletionTimeSec", finiteOrNull(estimatedTaskCompletionTimeSec));
+        out.put("linkSurvivalMarginSec", finiteOrNull(linkSurvivalMarginSec));
+        out.put("linkSurvivalMarginToCompletionSec", finiteOrNull(linkSurvivalMarginToCompletionSec));
         out.put("handoverRequired", handoverRequired);
         out.put("handoverAvailable", handoverAvailable);
-        out.put("mobilityRisk", mobilityRisk);
+        out.put("mobilityRisk", finiteOrNull(mobilityRisk));
         out.put("mobilityRiskSource", mobilityRiskSource);
-        out.put("serverProcessingMs", serverProcessingMs);
+        out.put("serverProcessingMs", finiteOrNull(serverProcessingMs));
         out.put("scenarioProfile", scenarioProfile);
         out.put("taskSourceMode", taskSourceMode);
         out.put("successProfile", successProfile);
         out.put("message", message);
         return out;
+    }
+
+    /** JSON has no NaN/Infinity values; unknown numeric evidence is null, not a favorable default. */
+    private static Object finiteOrNull(double value) {
+        return Double.isFinite(value) ? Double.valueOf(value) : null;
     }
 }

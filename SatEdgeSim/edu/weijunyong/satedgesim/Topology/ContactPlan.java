@@ -14,7 +14,7 @@ import java.util.Map;
  */
 public final class ContactPlan {
     public static final String SOURCE = "deterministic_trajectory";
-    public static final String LIFETIME_SOURCE = "deterministic_contact_plan";
+    public static final String LIFETIME_SOURCE = "deterministic_predictable_contact_plan";
 
     public static final class Stats {
         public long cacheHits;

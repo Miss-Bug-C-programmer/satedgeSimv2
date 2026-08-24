@@ -6,12 +6,25 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.TypeAdapter;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
+import com.google.gson.stream.JsonWriter;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -27,7 +40,40 @@ import com.sun.net.httpserver.HttpServer;
  *   POST /close       -> close the active session
  */
 public class SatEdgeSimRestServer {
-    private final Gson gson = new Gson();
+    private final Gson gson = new GsonBuilder()
+            .registerTypeAdapter(Double.class, FINITE_DOUBLE_ADAPTER)
+            .registerTypeAdapter(double.class, FINITE_DOUBLE_ADAPTER)
+            .registerTypeAdapter(Float.class, FINITE_FLOAT_ADAPTER)
+            .registerTypeAdapter(float.class, FINITE_FLOAT_ADAPTER)
+            .create();
+
+    private static final TypeAdapter<Double> FINITE_DOUBLE_ADAPTER = new TypeAdapter<Double>() {
+        @Override
+        public void write(JsonWriter out, Double value) throws IOException {
+            if (value == null || !Double.isFinite(value.doubleValue())) out.nullValue();
+            else out.value(value);
+        }
+
+        @Override
+        public Double read(JsonReader in) throws IOException {
+            if (in.peek() == JsonToken.NULL) { in.nextNull(); return null; }
+            return in.nextDouble();
+        }
+    };
+
+    private static final TypeAdapter<Float> FINITE_FLOAT_ADAPTER = new TypeAdapter<Float>() {
+        @Override
+        public void write(JsonWriter out, Float value) throws IOException {
+            if (value == null || !Float.isFinite(value.floatValue())) out.nullValue();
+            else out.value(value);
+        }
+
+        @Override
+        public Float read(JsonReader in) throws IOException {
+            if (in.peek() == JsonToken.NULL) { in.nextNull(); return null; }
+            return (float) in.nextDouble();
+        }
+    };
     private final ServerConfig config;
     private final Object sessionLock = new Object();
     private volatile SatEdgeSimSession session;
@@ -76,7 +122,7 @@ public class SatEdgeSimRestServer {
                     session = newSession;
                 }
                 newSession.start();
-                return ok(newSession.getState());
+                return ok(newSession.getLightweightState());
             }
         });
         server.createContext("/get_state", new JsonHandler() {
@@ -157,6 +203,13 @@ public class SatEdgeSimRestServer {
                     return ok(response);
                 }
                 return ok(session.getHealthPayload());
+            }
+        });
+        server.createContext("/version", new JsonHandler() {
+            @Override
+            protected JsonResponse handleJson(HttpExchange exchange, String body) {
+                requireMethod(exchange, "GET");
+                return ok(versionPayload());
             }
         });
         server.createContext("/capabilities", new JsonHandler() {
@@ -347,7 +400,10 @@ public class SatEdgeSimRestServer {
                 if (!(raw instanceof Number)) {
                     throw new IllegalArgumentException("advance_world requires numeric deltaSec");
                 }
-                return ok(session.advanceWorld(((Number) raw).doubleValue()));
+                String interventionId = request.get("interventionId") == null
+                        ? null : String.valueOf(request.get("interventionId"));
+                boolean plannerCompleted = Boolean.TRUE.equals(request.get("plannerCompleted"));
+                return ok(session.advanceWorld(((Number) raw).doubleValue(), interventionId, plannerCompleted));
             }
         });
         server.createContext("/control/epoch/advance", new JsonHandler() {
@@ -361,7 +417,10 @@ public class SatEdgeSimRestServer {
                 if (!(raw instanceof Number)) {
                     throw new IllegalArgumentException("control epoch advance requires numeric deltaSec");
                 }
-                return ok(session.advanceControlEpoch(((Number) raw).doubleValue()));
+                String interventionId = request.get("interventionId") == null
+                        ? null : String.valueOf(request.get("interventionId"));
+                boolean plannerCompleted = Boolean.TRUE.equals(request.get("plannerCompleted"));
+                return ok(session.advanceControlEpoch(((Number) raw).doubleValue(), interventionId, plannerCompleted));
             }
         });
         server.createContext("/control/epoch/resume", new JsonHandler() {
@@ -437,7 +496,10 @@ public class SatEdgeSimRestServer {
     }
 
     private void sendJson(HttpExchange exchange, int code, Object body) throws IOException {
-        String payload = gson.toJson(body);
+        // Gson rejects NaN/Infinity while serializing a response.  Unknown
+        // runtime measurements must remain explicit nulls rather than making
+        // an otherwise valid protocol response impossible to observe.
+        String payload = gson.toJson(jsonSafe(body));
         try {
             sendRaw(exchange, code, payload);
         } catch (IOException e) {
@@ -450,6 +512,70 @@ public class SatEdgeSimRestServer {
             }
             throw e;
         }
+    }
+
+    /**
+     * Runtime provenance used by the existing paper-ready preflight and
+     * deterministic trace manifest builder.  Unknown environment values are
+     * deliberately reported as unknown/missing; this endpoint never turns a
+     * missing provenance source into a publication-eligible value.
+     */
+    private Map<String, Object> versionPayload() {
+        Map<String, Object> payload = new LinkedHashMap<String, Object>();
+        payload.put("simulator_version", ControlPhysicalContract.SERVER_VERSION);
+        payload.put("git_commit", valueOrUnknown(System.getenv("SATEDGESIM_GIT_COMMIT")));
+        payload.put("rest_api_schema_version", ControlPhysicalContract.VERSION);
+        payload.put("state_schema_version", "rl-state-v2");
+        payload.put("candidate_cost_estimator_version", "v1_unified_delay_queue");
+        payload.put("lower_action_binding_version", "native-resource-binding-v2");
+        payload.put("settings_root", valueOrUnknown(config.simConfigFile));
+        payload.put("settings_sha256", sha256OrMissing(config.simConfigFile));
+        payload.put("build_time_utc", Instant.now().toString());
+        payload.put("provenance_source", "SatEdgeSimRestServer.runtime_environment_and_config");
+        return payload;
+    }
+
+    private String valueOrUnknown(String value) {
+        return value == null || value.trim().isEmpty() ? "unknown" : value;
+    }
+
+    private String sha256OrMissing(String rawPath) {
+        if (rawPath == null || rawPath.trim().isEmpty()) return "MISSING:settings_path";
+        Path path = Paths.get(rawPath);
+        if (!Files.isRegularFile(path)) return "MISSING:" + rawPath;
+        try {
+            byte[] bytes = Files.readAllBytes(path);
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(bytes);
+            StringBuilder out = new StringBuilder(hash.length * 2);
+            for (byte value : hash) out.append(String.format("%02x", value));
+            return out.toString();
+        } catch (IOException | NoSuchAlgorithmException error) {
+            return "MISSING:" + rawPath;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object jsonSafe(Object value) {
+        if (value == null) return null;
+        if (value instanceof Number) {
+            if (value instanceof Double && !Double.isFinite(((Double) value).doubleValue())) return null;
+            if (value instanceof Float && !Float.isFinite(((Float) value).floatValue())) return null;
+            return value;
+        }
+        if (value instanceof Map) {
+            Map<String, Object> result = new LinkedHashMap<String, Object>();
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                result.put(String.valueOf(entry.getKey()), jsonSafe(entry.getValue()));
+            }
+            return result;
+        }
+        if (value instanceof Iterable) {
+            List<Object> result = new ArrayList<Object>();
+            for (Object item : (Iterable<Object>) value) result.add(jsonSafe(item));
+            return result;
+        }
+        return value;
     }
 
     private void sendErrorJson(HttpExchange exchange, int code, String errorCode, String message) throws IOException {

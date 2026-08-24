@@ -28,7 +28,36 @@ public final class ConfigurationPatch {
     public Map<String, Object> provenance = new LinkedHashMap<String, Object>();
     public Map<String, Object> planningDelayMetadata = new LinkedHashMap<String, Object>();
     public Map<String, Object> acquisitionMetadata = new LinkedHashMap<String, Object>();
+    /** Server-issued physical advancement receipt required by strict intervention. */
+    public String physicalAdvanceReceiptId;
+    /** HTTP boundary fields; the server replaces these with verified state. */
+    public String validationReceiptId;
+    public String validationReceiptFailureReason;
+    public boolean serverValidationReceiptVerified = false;
+    public Long serverValidatedWorldVersion;
+    public String serverValidatedWorldIdentityDigest;
     public boolean strict = true;
+    /** In-process authority installed only after SatEdgeSim verifies the server receipt. */
+    private ValidationReceipt serverValidationReceipt;
+
+    void attachServerValidationReceipt(ValidationReceipt receipt) {
+        this.serverValidationReceipt = receipt;
+        if (receipt != null) {
+            this.serverValidationReceiptVerified = true;
+            this.serverValidatedWorldVersion = Long.valueOf(receipt.validatedWorldVersion);
+            this.serverValidatedWorldIdentityDigest = receipt.worldIdentityDigest;
+        }
+    }
+
+    boolean hasServerValidationReceipt() {
+        return serverValidationReceipt != null
+                && serverValidationReceipt.validationReceiptId != null
+                && serverValidationReceipt.validationReceiptId.equals(validationReceiptId);
+    }
+
+    ValidationReceipt getServerValidationReceipt() {
+        return serverValidationReceipt;
+    }
 
     @SuppressWarnings("unchecked")
     public static ConfigurationPatch fromRequest(Map<String, Object> request) {
@@ -71,9 +100,17 @@ public final class ConfigurationPatch {
         }
         result.originatingPlannerId = stringValue(source, "originating_planner_id", "originatingPlannerId");
         result.originatingInterventionId = stringValue(source, "originating_intervention_id", "originatingInterventionId");
+        if (result.originatingInterventionId == null) {
+            result.originatingInterventionId = stringValue(source, "intervention_id", "interventionId");
+        }
         copyMap(source, result.provenance, "provenance", null);
         copyMap(source, result.planningDelayMetadata, "planning_delay_metadata", "planningDelayMetadata");
         copyMap(source, result.acquisitionMetadata, "acquisition_metadata", "acquisitionMetadata");
+        result.physicalAdvanceReceiptId = stringValue(source, "physical_advance_receipt_id", "physicalAdvanceReceiptId");
+        result.validationReceiptId = stringValue(source, "validation_receipt_id", "validationReceiptId");
+        if (result.validationReceiptId == null) {
+            result.validationReceiptId = stringValue(source, "validation_receipt_token", "validationReceiptToken");
+        }
         Object strictValue = source.get("strict");
         if (strictValue == null) strictValue = source.get("strictMode");
         if (strictValue instanceof Boolean) result.strict = ((Boolean) strictValue).booleanValue();
@@ -108,6 +145,8 @@ public final class ConfigurationPatch {
         result.put("provenance", provenance);
         result.put("planningDelayMetadata", planningDelayMetadata);
         result.put("acquisitionMetadata", acquisitionMetadata);
+        result.put("physicalAdvanceReceiptId", physicalAdvanceReceiptId);
+        result.put("validationReceiptId", validationReceiptId);
         result.put("strict", strict);
         return result;
     }

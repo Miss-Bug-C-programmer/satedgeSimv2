@@ -33,7 +33,7 @@ public final class RlStateBuilder {
             Map<String, Object> metrics,
             String message) {
         return buildInternal(sessionId, status, decisionId, simulationManager, architecture, task, vmList,
-                orchestrationHistory, checker, metrics, message, false);
+                orchestrationHistory, checker, metrics, message, false, null);
     }
 
     /** Build only the selected candidate/resource projection for a planner call. */
@@ -50,7 +50,25 @@ public final class RlStateBuilder {
             Map<String, Object> metrics,
             String message) {
         return buildInternal(sessionId, status, decisionId, simulationManager, architecture, task, vmList,
-                orchestrationHistory, checker, metrics, message, true);
+                orchestrationHistory, checker, metrics, message, true, null);
+    }
+
+    /** Build selected candidates while retaining their original VM identities. */
+    public static RlState buildScoped(
+            String sessionId,
+            String status,
+            long decisionId,
+            SimulationManager simulationManager,
+            String[] architecture,
+            Task task,
+            List<Vm> vmList,
+            List<Integer> originalIndices,
+            List<List<Integer>> orchestrationHistory,
+            RlDecisionBridge.FeasibilityChecker checker,
+            Map<String, Object> metrics,
+            String message) {
+        return buildInternal(sessionId, status, decisionId, simulationManager, architecture, task, vmList,
+                orchestrationHistory, checker, metrics, message, true, originalIndices);
     }
 
     private static RlState buildInternal(
@@ -65,7 +83,8 @@ public final class RlStateBuilder {
             RlDecisionBridge.FeasibilityChecker checker,
             Map<String, Object> metrics,
             String message,
-            boolean scoped) {
+            boolean scoped,
+            List<Integer> originalIndices) {
         RlState state = new RlState();
         state.sessionId = sessionId;
         state.status = status;
@@ -101,7 +120,10 @@ public final class RlStateBuilder {
         String viabilitySummarySource = null;
         for (int i = 0; i < vmList.size(); i++) {
             Vm vm = vmList.get(i);
-            Orchestrator.FeasibilityInfo info = Orchestrator.evaluateOffloading(simulationManager, task, vm, architecture, orchestrationHistory, i);
+            int candidateIndex = originalIndices != null && i < originalIndices.size()
+                    ? originalIndices.get(i).intValue() : i;
+            Orchestrator.FeasibilityInfo info = Orchestrator.evaluateOffloading(
+                    simulationManager, task, vm, architecture, orchestrationHistory, candidateIndex);
             boolean visibleFeasible = info.isFeasible && checker.isFeasible(architecture, task, vm);
             if (!visibleFeasible && (info.infeasibleReason == null || "".equals(info.infeasibleReason))) {
                 info.isFeasible = false;
@@ -109,7 +131,7 @@ public final class RlStateBuilder {
             } else {
                 info.isFeasible = visibleFeasible;
             }
-            RlState.VmView view = buildVm(i, vm, effectiveSource, task, info);
+            RlState.VmView view = buildVm(candidateIndex, vm, effectiveSource, task, info);
             state.candidateVms.add(view);
             if ("VIABLE".equals(view.viabilityStatus)) viableCandidateCount++;
             else if ("UNCERTAIN".equals(view.viabilityStatus)) uncertainCandidateCount++;

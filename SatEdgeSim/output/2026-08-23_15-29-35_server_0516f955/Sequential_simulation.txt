@@ -1,0 +1,45 @@
+2026/08/23 15:29:35 - simulation time       0 (s) : ServersManager- Wrong percentages values (the sum is inferior than 100%), check edge_devices.xml file !
+2026/08/23 15:29:35 - simulation time       0 (s) : ServersManager- Datacenters and devices were generated
+2026/08/23 15:29:35 - simulation time       0 (s) : SimulationManager-  Orchestration algorithm= WEIGHT_GREEDY-  Architechitecture= ALL -  number of edge devices= 1
+2026/08/23 15:29:35 - simulation time       0 (s) : SimulationManager- Simulation: 1  , iteration: 1
+2026/08/23 15:29:36 - simulation time      52 (s) : 
+2026/08/23 15:29:36 - simulation time      52 (s) : ------------------------------------------------------- OUTPUT -------------------------------------------------------
+2026/08/23 15:29:36 - simulation time      52 (s) : 
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Tasks not sent because device died (low energy)                         :               0 % (0 tasks)
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Tasks sent from edge devices                                            :             100 % (1 among 1 generated tasks)
+2026/08/23 15:29:36 - simulation time      52 (s) : -------------------------------------All values below are based on the sent tasks-------------------------------------
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Tasks ETE delay                                                         :           0.71 seconds
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Average tasks ETE delay                                                 :           0.71 seconds
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Tasks execution delay                                                   :           0.71 seconds
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Average tasks execution delay                                           :           0.71 seconds
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Tasks waiting time (from task submiting to the execution start)         :              0 seconds
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Average tasks waiting time (from task submiting to the execution start) :              0 seconds
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Tasks successfully executed                                             :            100 % (1 among 1 sent tasks)
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Tasks failures
+2026/08/23 15:29:36 - simulation time      52 (s) :                                        Not executed due to resources unavailable:              0 % (0 tasks)
+2026/08/23 15:29:36 - simulation time      52 (s) :                               Successfully executed but failed due to high delay:              0 % (0 tasks from 1 successfully sent tasks)
+2026/08/23 15:29:36 - simulation time      52 (s) :                  Tasks execution results not returned because the device is dead:              0 % (0 tasks)
+2026/08/23 15:29:36 - simulation time      52 (s) :                      Tasks execution results not returned due to device mobility:              0 % (0 tasks)
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Tasks executed on each level                                : Cloud=              0 tasks (where 0 were successfully executed)
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                        Edge=              0 tasks (where 0 were successfully executed)
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                        Mist=              1 tasks (where 1 were successfully executed)
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Network usage                                                           :              0 seconds (The total traffic: 0 (MBytes))
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                         Wan=              0 seconds (NaN % of total usage, WAN used when downloading containers=NaN % of WAN usage)
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                         Lan=              0 seconds (NaN % of total usage, LAN used when downloading containers=NaN % of LAN usage)
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                    Average bandwidth per transfer=            NaN Mbps  
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Average vm CPU utilization                                              :              0 %
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Average vm CPU utilization per level                             : Cloud=              0 %
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                             Edge=              0 %
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                             Mist=              0 %
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Energy consumption                                                      :              0.0006 W,   -32.1396 dBW
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                                 :(Average:0 W/data center(or device), -48.4743 dBW/data center(or device))
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                                 :(Average:0.0006 W/task, -32.1396 dBW/task)
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Energy Consumption per level                                     : Cloud=                   0 W,   -44.0894 dBW
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                                 :(Average:0 W/data center, -56.6421 dBW/data center)
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                             Edge=              0.0001 W,     -42.84 dBW
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                                 :(Average:0 W/data center, -56.6421 dBW/data center)
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                             Mist=              0.0005 W,     -32.84 dBW
+2026/08/23 15:29:36 - simulation time      52 (s) :                                                                                 :(Average:0.0005 W/edge device, -32.84 dBW/edge device)
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Dead edge devices due to battery drain                                  :              0 devices (Among 0 devices with batteries (NaN %))
+2026/08/23 15:29:36 - simulation time      52 (s) : SimLog- Average remaining power (devices with batteries that are still alive)   :              0 Wh (Average: 0 %)
+2026/08/23 15:29:36 - simulation time      52 (s) : SimulationManager- the Scenario Simulation overflow times :0

@@ -53,6 +53,15 @@ public class RlResourceProfile {
         return bindingMode == RlResourceBindingMode.resource_aware_estimator_bound;
     }
 
+    public boolean hasInvalidNumericValue() {
+        return !Double.isFinite(cpuShare) || !Double.isFinite(bandwidthShare) || !Double.isFinite(txPowerRatio)
+                || !Double.isFinite(cpuShareClamped) || !Double.isFinite(bandwidthShareClamped)
+                || !Double.isFinite(txPowerRatioClamped)
+                || cpuShare < minShare || cpuShare > maxShare
+                || bandwidthShare < minShare || bandwidthShare > maxShare
+                || txPowerRatio < minShare || txPowerRatio > maxShare;
+    }
+
     public Map<String, Object> toMap() {
         Map<String, Object> out = new LinkedHashMap<String, Object>();
         out.put("cpuShare", cpuShare);
@@ -73,7 +82,7 @@ public class RlResourceProfile {
 
     private static double clamp(double value, double min, double max) {
         if (Double.isNaN(value) || Double.isInfinite(value)) {
-            return max;
+            return Double.NaN;
         }
         return Math.max(min, Math.min(max, value));
     }

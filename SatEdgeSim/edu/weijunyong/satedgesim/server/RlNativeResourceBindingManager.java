@@ -2,10 +2,13 @@ package edu.weijunyong.satedgesim.server;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 import org.cloudbus.cloudsim.vms.Vm;
 
@@ -69,6 +72,9 @@ public final class RlNativeResourceBindingManager {
         }
         if (vm == null) {
             throw new IllegalArgumentException("native_scheduler_bound requires a selected VM");
+        }
+        if (profile.hasInvalidNumericValue()) {
+            throw new IllegalArgumentException("invalid_resource_value");
         }
         long taskId = task.getId();
         long vmId = vm.getId();
@@ -139,6 +145,85 @@ public final class RlNativeResourceBindingManager {
         return binding == null ? BindingSnapshot.notRequested() : binding.snapshot("observed");
     }
 
+    /**
+     * Captures only bindings and VM scheduler state touched by one patch.  It
+     * is the rollback boundary for the canonical patch transaction; it is not
+     * a simulator-wide snapshot.
+     */
+    public static synchronized NativeStateSnapshot captureBeforeState(
+            Collection<Task> touchedTasks, Collection<Vm> touchedVms) {
+        NativeStateSnapshot snapshot = new NativeStateSnapshot();
+        Set<Long> taskIds = new HashSet<Long>();
+        Set<Long> vmIds = new HashSet<Long>();
+        if (touchedTasks != null) {
+            for (Task task : touchedTasks) if (task != null) taskIds.add(Long.valueOf(task.getId()));
+        }
+        if (touchedVms != null) {
+            for (Vm vm : touchedVms) if (vm != null) vmIds.add(Long.valueOf(vm.getId()));
+        }
+        snapshot.taskIds.addAll(taskIds);
+        snapshot.vmIds.addAll(vmIds);
+        for (VmState state : vmStates.values()) {
+            if (state != null && (vmIds.contains(Long.valueOf(state.vmId)))) {
+                snapshot.vms.put(Long.valueOf(state.vmId), new VmRecord(state.vm, state.baseMips, state.currentAppliedMips));
+            }
+        }
+        if (touchedVms != null) {
+            for (Vm vm : touchedVms) {
+                if (vm != null && !snapshot.vms.containsKey(Long.valueOf(vm.getId()))) {
+                    snapshot.vms.put(Long.valueOf(vm.getId()), new VmRecord(vm, readVmMips(vm), readVmMips(vm)));
+                }
+            }
+        }
+        for (Binding binding : taskBindings.values()) {
+            if (binding == null || binding.released) continue;
+            if (taskIds.contains(Long.valueOf(binding.taskId)) || vmIds.contains(Long.valueOf(binding.vmId))) {
+                snapshot.bindings.put(Long.valueOf(binding.taskId), BindingRecord.from(binding));
+            }
+        }
+        return snapshot;
+    }
+
+    /** Restores only the native entities captured by captureBeforeState. */
+    public static synchronized void restore(NativeStateSnapshot snapshot) {
+        if (snapshot == null) return;
+        List<Binding> remove = new ArrayList<Binding>();
+        for (Binding binding : taskBindings.values()) {
+            if (binding == null) continue;
+            if (snapshot.taskIds.contains(Long.valueOf(binding.taskId))
+                    || snapshot.vmIds.contains(Long.valueOf(binding.vmId))) remove.add(binding);
+        }
+        for (Binding binding : remove) {
+            binding.released = true;
+            if (binding.vmState != null) binding.vmState.activeBindings.remove(Long.valueOf(binding.taskId));
+            taskBindings.remove(Long.valueOf(binding.taskId));
+        }
+        for (Long vmId : snapshot.vmIds) vmStates.remove(vmId);
+        for (VmRecord vm : snapshot.vms.values()) {
+            VmState restored = new VmState(vm.vm, vm.vmId, vm.baseMips);
+            restored.currentAppliedMips = vm.currentAppliedMips;
+            vmStates.put(Long.valueOf(vm.vmId), restored);
+            if (Math.abs(readVmMips(vm.vm) - vm.currentAppliedMips) > 1.0e-9) {
+                applyVmMips(vm.vm, vm.currentAppliedMips);
+            }
+        }
+        for (BindingRecord record : snapshot.bindings.values()) {
+            VmState state = vmStates.get(Long.valueOf(record.vmId));
+            if (state == null) {
+                state = new VmState(record.vm, record.vmId, record.baseMips);
+                vmStates.put(Long.valueOf(record.vmId), state);
+            }
+            Binding restored = record.restore(state);
+            taskBindings.put(Long.valueOf(restored.taskId), restored);
+            state.activeBindings.put(Long.valueOf(restored.taskId), restored);
+        }
+        for (VmRecord vm : snapshot.vms.values()) {
+            if (Math.abs(readVmMips(vm.vm) - vm.currentAppliedMips) > 1.0e-9) {
+                applyVmMips(vm.vm, vm.currentAppliedMips);
+            }
+        }
+    }
+
     private static void refreshTransfersForTask(Task task, SimulationManager simulationManager) {
         if (task == null || simulationManager == null || simulationManager.getNetworkModel() == null) return;
         for (FileTransferProgress transfer : simulationManager.getNetworkModel().getTransferProgressList()) {
@@ -172,14 +257,14 @@ public final class RlNativeResourceBindingManager {
         if (profile == null || !profile.nativeSchedulerBound()) {
             transfer.setNativeNetworkBound(false);
             transfer.setNativeTxPowerBound(false);
-            transfer.setBandwidthShareClamped(1.0);
-            transfer.setTxPowerRatioClamped(1.0);
+            transfer.setBandwidthShareProfile(1.0, 1.0);
+            transfer.setTxPowerRatioProfile(1.0, 1.0);
             return;
         }
         transfer.setNativeNetworkBound(true);
         transfer.setNativeTxPowerBound(true);
-        transfer.setBandwidthShareClamped(profile.bandwidthShareClamped);
-        transfer.setTxPowerRatioClamped(profile.txPowerRatioClamped);
+        transfer.setBandwidthShareProfile(profile.bandwidthShare, profile.bandwidthShareClamped);
+        transfer.setTxPowerRatioProfile(profile.txPowerRatio, profile.txPowerRatioClamped);
     }
 
     /**
@@ -484,5 +569,124 @@ public final class RlNativeResourceBindingManager {
             out.put("tx_power_binding_scope", TX_POWER_BINDING_SCOPE);
             return out;
         }
+    }
+
+    public static final class NativeStateSnapshot {
+        private final Set<Long> taskIds = new HashSet<Long>();
+        private final Set<Long> vmIds = new HashSet<Long>();
+        private final Map<Long, VmRecord> vms = new LinkedHashMap<Long, VmRecord>();
+        private final Map<Long, BindingRecord> bindings = new LinkedHashMap<Long, BindingRecord>();
+    }
+
+    private static final class VmRecord {
+        final Vm vm;
+        final long vmId;
+        final double baseMips;
+        final double currentAppliedMips;
+
+        VmRecord(Vm vm, double baseMips, double currentAppliedMips) {
+            this.vm = vm;
+            this.vmId = vm.getId();
+            this.baseMips = baseMips;
+            this.currentAppliedMips = currentAppliedMips;
+        }
+    }
+
+    private static final class BindingRecord {
+        long taskId;
+        long vmId;
+        int vmIndex;
+        Vm vm;
+        RlResourceProfile profile;
+        double cpuShare;
+        double bandwidthShare;
+        double txPowerRatio;
+        double baseMips;
+        double appliedMips;
+        double restoredMips;
+        double boundAt;
+        double releasedAt;
+        double effectiveMips;
+        double effectiveCpuShare;
+        double capacityMips;
+        double lastObservedFinishedLength;
+        double lastObservedAt;
+        double observedAt;
+        int contentionCount;
+        String contentionContext;
+        boolean nativeBindingApplied;
+
+        static BindingRecord from(Binding binding) {
+            BindingRecord out = new BindingRecord();
+            out.taskId = binding.taskId;
+            out.vmId = binding.vmId;
+            out.vmIndex = binding.vmIndex;
+            out.vm = binding.vm;
+            out.profile = copyProfile(binding.profile);
+            out.cpuShare = binding.cpuShare;
+            out.bandwidthShare = binding.bandwidthShare;
+            out.txPowerRatio = binding.txPowerRatio;
+            out.baseMips = binding.baseMips;
+            out.appliedMips = binding.appliedMips;
+            out.restoredMips = binding.restoredMips;
+            out.boundAt = binding.boundAt;
+            out.releasedAt = binding.releasedAt;
+            out.effectiveMips = binding.effectiveMips;
+            out.effectiveCpuShare = binding.effectiveCpuShare;
+            out.capacityMips = binding.capacityMips;
+            out.lastObservedFinishedLength = binding.lastObservedFinishedLength;
+            out.lastObservedAt = binding.lastObservedAt;
+            out.observedAt = binding.observedAt;
+            out.contentionCount = binding.contentionCount;
+            out.contentionContext = binding.contentionContext;
+            out.nativeBindingApplied = binding.nativeBindingApplied;
+            return out;
+        }
+
+        Binding restore(VmState state) {
+            Binding out = new Binding();
+            out.taskId = taskId;
+            out.vmId = vmId;
+            out.vmIndex = vmIndex;
+            out.vm = vm;
+            out.vmState = state;
+            out.profile = copyProfile(profile);
+            out.cpuShare = cpuShare;
+            out.bandwidthShare = bandwidthShare;
+            out.txPowerRatio = txPowerRatio;
+            out.baseMips = baseMips;
+            out.appliedMips = appliedMips;
+            out.restoredMips = restoredMips;
+            out.boundAt = boundAt;
+            out.releasedAt = releasedAt;
+            out.effectiveMips = effectiveMips;
+            out.effectiveCpuShare = effectiveCpuShare;
+            out.capacityMips = capacityMips;
+            out.lastObservedFinishedLength = lastObservedFinishedLength;
+            out.lastObservedAt = lastObservedAt;
+            out.observedAt = observedAt;
+            out.contentionCount = contentionCount;
+            out.contentionContext = contentionContext;
+            out.nativeBindingApplied = nativeBindingApplied;
+            out.released = false;
+            return out;
+        }
+    }
+
+    private static RlResourceProfile copyProfile(RlResourceProfile source) {
+        if (source == null) return null;
+        RlResourceProfile out = new RlResourceProfile();
+        out.cpuShare = source.cpuShare;
+        out.bandwidthShare = source.bandwidthShare;
+        out.txPowerRatio = source.txPowerRatio;
+        out.cpuShareClamped = source.cpuShareClamped;
+        out.bandwidthShareClamped = source.bandwidthShareClamped;
+        out.txPowerRatioClamped = source.txPowerRatioClamped;
+        out.continuousApplied = source.continuousApplied;
+        out.bindingMode = source.bindingMode;
+        out.minShare = source.minShare;
+        out.maxShare = source.maxShare;
+        out.validationWarnings = new ArrayList<String>(source.validationWarnings);
+        return out;
     }
 }

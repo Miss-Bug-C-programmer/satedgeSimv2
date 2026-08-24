@@ -76,10 +76,12 @@ public final class NativeTransferProgressContractTest {
     private static void testCapabilityRequiresObservedEvent() {
         Map<String, Object> noObservation = new LinkedHashMap<String, Object>();
         noObservation.put("nativeContactInterruptionObserved", false);
+        noObservation.put("nativeContactInterruptionEvidenceConsistent", false);
         Map<String, Object> beforeEvent = ControlPhysicalContract.capabilities(true, noObservation);
         require(Boolean.FALSE.equals(beforeEvent.get("supportsMidTransferContactEnforcement")),
                 "contact capability must fail closed before a qualifying runtime event");
         noObservation.put("nativeContactInterruptionObserved", true);
+        noObservation.put("nativeContactInterruptionEvidenceConsistent", true);
         Map<String, Object> afterEvent = ControlPhysicalContract.capabilities(true, noObservation);
         require(Boolean.TRUE.equals(afterEvent.get("supportsMidTransferContactEnforcement")),
                 "contact capability may become observable only after qualifying evidence");
