@@ -43,7 +43,9 @@ public class ExecutionReceipt {
     public boolean estimatorBound = false;
     public boolean fullHybridClosedLoopClaimAllowed = false;
     public boolean nativeBindingApplied = false;
+    /** Legacy VM-capacity mutation claim. False for task-demand binding. */
     public boolean nativeCpuMipsBound = false;
+    public boolean nativeCpuDemandBound = false;
     public boolean nativeNetworkBandwidthBound = false;
     public boolean nativeTxPowerBound = false;
     public double nativeBaseMips = 0.0;
@@ -150,6 +152,8 @@ public class ExecutionReceipt {
         out.put("native_binding_applied", nativeBindingApplied);
         out.put("nativeCpuMipsBound", nativeCpuMipsBound);
         out.put("native_cpu_mips_bound", nativeCpuMipsBound);
+        out.put("nativeCpuDemandBound", nativeCpuDemandBound);
+        out.put("native_cpu_demand_bound", nativeCpuDemandBound);
         out.put("nativeNetworkBandwidthBound", nativeNetworkBandwidthBound);
         out.put("native_network_bandwidth_bound", nativeNetworkBandwidthBound);
         out.put("nativeTxPowerBound", nativeTxPowerBound);

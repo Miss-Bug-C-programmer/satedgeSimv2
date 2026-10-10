@@ -31,8 +31,8 @@ public class RlResourceBindingSmoke {
         RlResourceProfile nativeProfile = RlResourceProfile.fromAction(high, RlResourceBindingMode.native_scheduler_bound);
         require(nativeProfile.nativeSchedulerBound(), "native_scheduler_bound must be accepted after native binding implementation");
         require(nativeProfile.continuousApplied, "native binding must apply continuous resources");
-        require(Boolean.TRUE.equals(RlResourceBindingAudit.metadata(nativeProfile).get("full_hybrid_closed_loop_claim_allowed")),
-                "native binding metadata must allow full hybrid closed-loop claims");
+        require(Boolean.FALSE.equals(RlResourceBindingAudit.metadata(nativeProfile).get("full_hybrid_closed_loop_claim_allowed")),
+                "static binding metadata must wait for runtime evidence before full claims");
 
         ExecutionReceipt scheduling = new ExecutionReceipt();
         scheduling.receiptStage = "scheduling";

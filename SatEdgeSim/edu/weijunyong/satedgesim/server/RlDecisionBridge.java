@@ -274,7 +274,8 @@ public class RlDecisionBridge {
         receipt.nativeSchedulerBound = profile.nativeSchedulerBound();
         receipt.estimatorBound = profile.estimatorBound();
         receipt.nativeBindingApplied = nativeBinding != null && nativeBinding.nativeBindingApplied;
-        receipt.nativeCpuMipsBound = receipt.nativeBindingApplied;
+        receipt.nativeCpuMipsBound = false;
+        receipt.nativeCpuDemandBound = receipt.nativeBindingApplied;
         receipt.nativeNetworkBandwidthBound = receipt.nativeBindingApplied;
         receipt.nativeTxPowerBound = receipt.nativeBindingApplied;
         receipt.nativeBinding = nativeBinding != null && nativeBinding.requested ? nativeBinding.toMap() : null;
@@ -368,12 +369,35 @@ public class RlDecisionBridge {
                 double simTime = simulationManager == null || simulationManager.getSimulation() == null
                         ? 0.0
                         : simulationManager.getSimulation().clock();
-                resolution.nativeBinding = RlNativeResourceBindingManager.bindTask(
-                        task,
-                        vmList.get(selected),
-                        selected,
-                        resolution.resourceProfile,
-                        simTime);
+                try {
+                    resolution.nativeBinding = RlNativeResourceBindingManager.bindTask(
+                            task,
+                            vmList.get(selected),
+                            selected,
+                            resolution.resourceProfile,
+                            simTime);
+                } catch (RuntimeException nativeBindingFailure) {
+                    // A native scheduler/binding failure is authoritative: do
+                    // not execute the task with an unbound requested profile,
+                    // and do not leave submitAction waiting forever after the
+                    // simulation thread exits.  Publish a rejected receipt on
+                    // the same canonical decision bridge and wake the caller.
+                    resolution.accepted = false;
+                    resolution.fallbackReason = "native_resource_binding_failed:"
+                            + nativeBindingFailure.getClass().getSimpleName();
+                    lastMessage = "rejected action targetVmIndex=" + selected
+                            + " reason=" + resolution.fallbackReason;
+                    lastExecutionReceipt = resolution.toRejectedReceipt(
+                            decisionState, readEnergyCounter(simulationManager));
+                    cacheReceipt(lastExecutionReceipt);
+                    lastDecision = lastExecutionReceipt.toMap();
+                    currentState = null;
+                    pendingDecisionContext = null;
+                    pendingAction = null;
+                    pendingResolution = null;
+                    lock.notifyAll();
+                    return -1;
+                }
             }
             lastExecutionReceipt = resolution.toAcceptedReceipt(decisionState, energyBefore, readEnergyCounter(simulationManager));
             cacheReceipt(lastExecutionReceipt);
@@ -1390,7 +1414,8 @@ public class RlDecisionBridge {
             receipt.nativeSchedulerBound = resourceProfile != null && resourceProfile.nativeSchedulerBound();
             receipt.estimatorBound = resourceProfile != null && resourceProfile.estimatorBound();
             receipt.nativeBindingApplied = nativeBinding != null && nativeBinding.nativeBindingApplied;
-            receipt.nativeCpuMipsBound = receipt.nativeBindingApplied;
+            receipt.nativeCpuMipsBound = false;
+            receipt.nativeCpuDemandBound = receipt.nativeBindingApplied;
             receipt.nativeNetworkBandwidthBound = receipt.nativeBindingApplied;
             receipt.nativeTxPowerBound = receipt.nativeBindingApplied;
             receipt.nativeBaseMips = nativeBinding == null ? 0.0 : nativeBinding.baseMips;
@@ -1399,7 +1424,10 @@ public class RlDecisionBridge {
             receipt.nativeBandwidthShare = nativeBinding == null ? 1.0 : nativeBinding.bandwidthShare;
             receipt.nativeTxPowerRatio = nativeBinding == null ? 1.0 : nativeBinding.txPowerRatio;
             receipt.nativeBinding = nativeBinding == null ? null : nativeBinding.toMap();
-            receipt.fullHybridClosedLoopClaimAllowed = receipt.nativeSchedulerBound && receipt.nativeBindingApplied;
+            // Scheduling confirms that native consumers were bound, not that
+            // physical execution has yet been observed. Publication
+            // eligibility is issued only by dynamic runtime validation.
+            receipt.fullHybridClosedLoopClaimAllowed = false;
             if (resourceEstimate != null) {
                 receipt.estimatorExpectedDelaySec = Math.max(0.0, resourceEstimate.expectedDelaySec);
                 receipt.estimatorExpectedEnergyJ = Math.max(0.0, resourceEstimate.expectedEnergyJ);

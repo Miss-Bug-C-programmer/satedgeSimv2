@@ -43,6 +43,8 @@ public final class ControlPhysicalContract {
         result.put("supportsTaskTargetMigration", false);
         result.put("supportsDynamicPriorityActuation", false);
         result.put("supportsActualAppliedInterventionEvidence", true);
+        result.put("supportsServerIssuedOutcomeMeasurement", true);
+        result.put("outcomeMeasurementSemantics", "server_metric_snapshots_fixed_post_intervention_window_v1");
         result.put("supportsProtocolEvents", true);
         result.put("supportsDynamicValidationReport", true);
         result.put("strictPhysicalClaimsDefault", true);
@@ -81,7 +83,10 @@ public final class ControlPhysicalContract {
         result.put("scopeDimensions", Arrays.asList("task_ids", "source_ids", "node_ids", "link_ids", "route_ids", "resource_keys"));
         result.put("supportedAcquisitionBudgetDimensions", Arrays.asList("max_candidate_count"));
         result.put("supportedPlannerBudgetDimensions", Arrays.asList("max_planner_evaluations", "max_compute_budget", "time_budget_ms"));
-        result.put("supportedCoordinationBudgetDimensions", Arrays.asList("max_coordination_bytes"));
+        // Signalling/coordination bytes are not currently consumed by a
+        // native backend transport limiter.  They remain an estimated cost
+        // primitive in TriSatFlow, not an acquisition capability.
+        result.put("supportedCoordinationBudgetDimensions", Arrays.asList());
         result.put("budgetDimensions", Arrays.asList("max_candidate_count"));
         result.put("persistentRuleDimensions", Arrays.asList("source", "application", "traffic", "flow", "default", "node", "route", "resource", "task_override"));
         result.put("persistentConfigurationBindingDimensions", Arrays.asList("target_vm", "cpuShare", "bandwidthShare", "txPowerRatio"));

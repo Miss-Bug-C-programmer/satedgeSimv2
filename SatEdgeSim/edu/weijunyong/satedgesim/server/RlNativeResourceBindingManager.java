@@ -1,6 +1,5 @@
 package edu.weijunyong.satedgesim.server;
 
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -11,6 +10,8 @@ import java.util.Map;
 import java.util.Set;
 
 import org.cloudbus.cloudsim.vms.Vm;
+import org.cloudbus.cloudsim.utilizationmodels.UtilizationModel;
+import org.cloudbus.cloudsim.utilizationmodels.UtilizationModelDynamic;
 
 import edu.weijunyong.satedgesim.Network.FileTransferProgress;
 import edu.weijunyong.satedgesim.SimulationManager.SimulationManager;
@@ -21,19 +22,20 @@ import edu.weijunyong.satedgesim.TasksGenerator.Task;
  *
  * <p>The binding is deliberately explicit and task-scoped:
  * <ul>
- *   <li>CPU: selected VM MIPS is reduced while one or more native-bound tasks are active.</li>
+ *   <li>CPU: the task's native Cloudlet CPU demand is bounded by cpuShare and is
+ *       consumed by CloudSim's existing Cloudlet/VM schedulers.</li>
  *   <li>Network: FileTransferProgress bandwidth allocation is multiplied by bandwidthShare.</li>
  *   <li>Power: wireless transmission energy is multiplied by txPowerRatio.</li>
  * </ul>
  *
- * <p>CloudSim VMs expose a VM-wide MIPS value rather than a per-cloudlet MIPS cap in
- * this project. For overlapping native-bound tasks on the same VM, the VM is held at
- * the most restrictive active cpuShare. This avoids over-claiming a per-task scheduler
- * that SatEdgeSim/CloudSim is not using, while still making cpuShare affect the native
- * VM scheduler rather than only a cost estimator.
+ * <p>The CPU binding is intentionally task-local.  Mutating a placed VM's Host
+ * allocation from a paused orchestration callback can invalidate CloudSim's current
+ * scheduling event.  A {@link UtilizationModelDynamic} is therefore installed on the
+ * native Task/Cloudlet.  The existing Cloudlet scheduler remains the only service
+ * allocator and contention/conservation evidence is observed from finished work.
  */
 public final class RlNativeResourceBindingManager {
-    public static final String CPU_BINDING_SCOPE = "vm_mips_scoped_min_active_share";
+    public static final String CPU_BINDING_SCOPE = "task_cloudlet_cpu_demand_share";
     public static final String NETWORK_BINDING_SCOPE = "shared_lan_domain_and_global_wan";
     public static final String TX_POWER_BINDING_SCOPE = "wireless_transmission_energy_ratio";
 
@@ -79,9 +81,11 @@ public final class RlNativeResourceBindingManager {
         long taskId = task.getId();
         long vmId = vm.getId();
         VmState state = vmStates.get(Long.valueOf(vmId));
+        boolean stateCreated = false;
         if (state == null || state.vm != vm) {
             state = new VmState(vm, vmId, readVmMips(vm));
             vmStates.put(Long.valueOf(vmId), state);
+            stateCreated = true;
         }
         Binding existing = taskBindings.get(Long.valueOf(taskId));
         if (existing != null && !existing.released) {
@@ -93,6 +97,8 @@ public final class RlNativeResourceBindingManager {
         binding.vmIndex = vmIndex;
         binding.vm = vm;
         binding.vmState = state;
+        binding.task = task;
+        binding.originalCpuUtilizationModel = task.getUtilizationModelCpu();
         binding.profile = profile;
         binding.cpuShare = profile.cpuShareClamped;
         binding.bandwidthShare = profile.bandwidthShareClamped;
@@ -103,7 +109,26 @@ public final class RlNativeResourceBindingManager {
         binding.lastObservedAt = simulationTime;
         taskBindings.put(Long.valueOf(taskId), binding);
         state.activeBindings.put(Long.valueOf(taskId), binding);
-        recomputeVmMips(state);
+        try {
+            applyTaskCpuShare(binding);
+            recomputeVmState(state);
+        } catch (RuntimeException applyFailure) {
+            restoreTaskCpuModel(binding);
+            taskBindings.remove(Long.valueOf(taskId));
+            state.activeBindings.remove(Long.valueOf(taskId));
+            try {
+                if (state.activeBindings.isEmpty()) {
+                    state.currentAppliedMips = state.baseMips;
+                    if (stateCreated) vmStates.remove(Long.valueOf(vmId));
+                } else {
+                    recomputeVmState(state);
+                }
+            } catch (RuntimeException rollbackFailure) {
+                throw new IllegalStateException(
+                        "native CPU binding failed and rollback was rejected", rollbackFailure);
+            }
+            throw applyFailure;
+        }
         binding.nativeBindingApplied = true;
         return binding.snapshot("bound");
     }
@@ -119,6 +144,14 @@ public final class RlNativeResourceBindingManager {
         if (binding == null) {
             return BindingSnapshot.notRequested();
         }
+        // A fast Cloudlet can finish between REST/control-plane sampling
+        // points.  Capture its final native finished-length delta before the
+        // binding is removed; otherwise real CPU service occurred but runtime
+        // evidence remains falsely unobserved.  This is observation of the
+        // CloudSim scheduler result, not a shadow allocator.
+        List<Task> completed = new ArrayList<Task>();
+        completed.add(task);
+        observeRuntimeProgress(completed, simulationTime);
         return releaseBinding(binding, simulationTime);
     }
 
@@ -194,6 +227,7 @@ public final class RlNativeResourceBindingManager {
                     || snapshot.vmIds.contains(Long.valueOf(binding.vmId))) remove.add(binding);
         }
         for (Binding binding : remove) {
+            restoreTaskCpuModel(binding);
             binding.released = true;
             if (binding.vmState != null) binding.vmState.activeBindings.remove(Long.valueOf(binding.taskId));
             taskBindings.remove(Long.valueOf(binding.taskId));
@@ -203,9 +237,6 @@ public final class RlNativeResourceBindingManager {
             VmState restored = new VmState(vm.vm, vm.vmId, vm.baseMips);
             restored.currentAppliedMips = vm.currentAppliedMips;
             vmStates.put(Long.valueOf(vm.vmId), restored);
-            if (Math.abs(readVmMips(vm.vm) - vm.currentAppliedMips) > 1.0e-9) {
-                applyVmMips(vm.vm, vm.currentAppliedMips);
-            }
         }
         for (BindingRecord record : snapshot.bindings.values()) {
             VmState state = vmStates.get(Long.valueOf(record.vmId));
@@ -214,13 +245,9 @@ public final class RlNativeResourceBindingManager {
                 vmStates.put(Long.valueOf(record.vmId), state);
             }
             Binding restored = record.restore(state);
+            applyTaskCpuShare(restored);
             taskBindings.put(Long.valueOf(restored.taskId), restored);
             state.activeBindings.put(Long.valueOf(restored.taskId), restored);
-        }
-        for (VmRecord vm : snapshot.vms.values()) {
-            if (Math.abs(readVmMips(vm.vm) - vm.currentAppliedMips) > 1.0e-9) {
-                applyVmMips(vm.vm, vm.currentAppliedMips);
-            }
         }
     }
 
@@ -270,8 +297,8 @@ public final class RlNativeResourceBindingManager {
     /**
      * Observes service delivered by the native CloudSim Cloudlet scheduler.
      * This is deliberately a delta of Cloudlet finished length over simulation
-     * time; it is not a second allocator.  The VM MIPS value remains the
-     * physical capacity consumed by CloudSim's scheduler.
+     * time; it is not a second allocator.  The task demand model and VM MIPS
+     * capacity are both consumed by CloudSim's scheduler.
      */
     public static synchronized void observeRuntimeProgress(List<Task> tasks, double simulationTime) {
         Map<Long, Task> byId = new HashMap<Long, Task>();
@@ -285,6 +312,14 @@ public final class RlNativeResourceBindingManager {
             Task task = byId.get(Long.valueOf(binding.taskId));
             if (task == null) continue;
             double finished = Math.max(0.0, task.getFinishedLengthSoFar());
+            // CloudSim Plus 4.3 may expose zero finishedLengthSoFar after a
+            // completed Cloudlet has moved out of the execution list.  Its
+            // SUCCESS lifecycle state is authoritative native evidence that
+            // the full Cloudlet length was serviced; never substitute the
+            // requested share or estimator output for this value.
+            if (task.getStatus() != null && "SUCCESS".equalsIgnoreCase(task.getStatus().name())) {
+                finished = Math.max(finished, Math.max(0.0, task.getLength()));
+            }
             double elapsed = simulationTime - binding.lastObservedAt;
             if (elapsed > 1.0e-9) {
                 double delta = Math.max(0.0, finished - binding.lastObservedFinishedLength);
@@ -295,7 +330,8 @@ public final class RlNativeResourceBindingManager {
             }
             binding.lastObservedFinishedLength = finished;
             binding.lastObservedAt = simulationTime;
-            binding.capacityMips = binding.vmState == null ? binding.appliedMips : binding.vmState.currentAppliedMips;
+            binding.capacityMips = binding.vmState == null ? binding.appliedMips
+                    : totalCapacityMips(binding.vmState);
             binding.contentionCount = binding.vmState == null ? 0 : binding.vmState.activeBindings.size();
             binding.contentionContext = binding.vmState == null ? "unknown" :
                     "vm:" + binding.vmState.vmId + ":active_tasks=" + binding.vmState.activeBindings.size();
@@ -310,7 +346,7 @@ public final class RlNativeResourceBindingManager {
                 if (binding != null && !binding.released) effectiveSum += Math.max(0.0, binding.effectiveMips);
             }
             maxCpuConservationViolation = Math.max(maxCpuConservationViolation,
-                    Math.max(0.0, effectiveSum - state.currentAppliedMips));
+                    Math.max(0.0, effectiveSum - totalCapacityMips(state)));
         }
     }
 
@@ -325,7 +361,7 @@ public final class RlNativeResourceBindingManager {
         out.put("sampleCount", runtimeSampleCount);
         out.put("conservationSatisfied", runtimeSampleCount > 0L && maxCpuConservationViolation <= 1.0e-6);
         out.put("maxEffectiveOverCapacityMips", maxCpuConservationViolation);
-        out.put("executionConsumer", "CloudSim_native_vm_cloudlet_scheduler");
+        out.put("executionConsumer", "CloudSim_native_task_utilization_plus_vm_cloudlet_scheduler");
         out.put("entries", entries);
         out.put("trace", new ArrayList<Map<String, Object>>(runtimeTrace));
         return out;
@@ -345,8 +381,12 @@ public final class RlNativeResourceBindingManager {
             for (Binding binding : state.activeBindings.values()) {
                 if (binding != null && !binding.released) effectiveSum += binding.effectiveMips;
             }
+            double capacity = totalCapacityMips(state);
             vm.put("effective_mips_sum", effectiveSum);
-            vm.put("conservation_satisfied", effectiveSum <= state.currentAppliedMips + 1.0e-6);
+            vm.put("capacity_mips", capacity);
+            vm.put("capacity_per_pe_mips", state.currentAppliedMips);
+            vm.put("pe_count", state.vm == null ? 1 : state.vm.getNumberOfPes());
+            vm.put("conservation_satisfied", effectiveSum <= capacity + 1.0e-6);
             vms.put(String.valueOf(entry.getKey()), vm);
         }
         out.put("vm_states", vms);
@@ -359,32 +399,25 @@ public final class RlNativeResourceBindingManager {
         }
         binding.released = true;
         binding.releasedAt = simulationTime;
+        restoreTaskCpuModel(binding);
         if (binding.vmState != null) {
             binding.vmState.activeBindings.remove(Long.valueOf(binding.taskId));
-            recomputeVmMips(binding.vmState);
+            recomputeVmState(binding.vmState);
             binding.restoredMips = binding.vmState.currentAppliedMips;
         }
         taskBindings.remove(Long.valueOf(binding.taskId));
         return binding.snapshot("released");
     }
 
-    private static void recomputeVmMips(VmState state) {
+    private static void recomputeVmState(VmState state) {
         if (state == null || state.vm == null) {
             return;
         }
-        double minShare = 1.0;
+        state.currentAppliedMips = state.baseMips;
         for (Binding binding : state.activeBindings.values()) {
             if (binding != null && !binding.released) {
-                minShare = Math.min(minShare, Math.max(0.0, binding.cpuShare));
-            }
-        }
-        double targetMips = Math.max(1.0, state.baseMips * minShare);
-        applyVmMips(state.vm, targetMips);
-        state.currentAppliedMips = targetMips;
-        for (Binding binding : state.activeBindings.values()) {
-            if (binding != null && !binding.released) {
-                binding.appliedMips = targetMips;
-                binding.capacityMips = targetMips;
+                binding.appliedMips = Math.max(0.0, state.baseMips * binding.cpuShare);
+                binding.capacityMips = totalCapacityMips(state);
                 binding.contentionCount = state.activeBindings.size();
                 binding.contentionContext = "vm:" + state.vmId + ":active_tasks=" + state.activeBindings.size();
             }
@@ -395,53 +428,23 @@ public final class RlNativeResourceBindingManager {
         return Math.max(1.0, vm == null ? 1.0 : vm.getMips());
     }
 
-    private static void applyVmMips(Vm vm, double mips) {
-        if (vm == null) {
-            throw new IllegalArgumentException("cannot apply native CPU binding to null VM");
-        }
-        double target = Math.max(1.0, mips);
-        if (invokeSetter(vm, "setMips", double.class, Double.valueOf(target))) {
-            return;
-        }
-        if (invokeSetter(vm, "setMips", long.class, Long.valueOf(Math.round(target)))) {
-            return;
-        }
-        try {
-            Method getProcessor = vm.getClass().getMethod("getProcessor");
-            Object processor = getProcessor.invoke(vm);
-            if (processor != null && invokeSetter(processor, "setMips", double.class, Double.valueOf(target))) {
-                return;
-            }
-            if (processor != null && invokeSetter(processor, "setMips", long.class, Long.valueOf(Math.round(target)))) {
-                return;
-            }
-            if (processor != null && invokeSetter(processor, "setCapacity", double.class, Double.valueOf(target))) {
-                return;
-            }
-            if (processor != null && invokeSetter(processor, "setCapacity", long.class, Long.valueOf(Math.round(target)))) {
-                return;
-            }
-        } catch (NoSuchMethodException e) {
-            // Fall through to the explicit error below.
-        } catch (Exception e) {
-            throw new IllegalStateException("failed to apply native CPU MIPS binding through VM processor", e);
-        }
-        throw new IllegalStateException(
-                "CloudSim VM does not expose setMips or processor capacity setters; cannot apply native CPU binding");
+    /** CloudSim exposes VM MIPS per PE; conservation is checked at VM capacity. */
+    private static double totalCapacityMips(VmState state) {
+        if (state == null) return 0.0;
+        long pes = state.vm == null ? 1L : Math.max(1L, state.vm.getNumberOfPes());
+        return Math.max(1.0, state.currentAppliedMips * pes);
     }
 
-    private static boolean invokeSetter(Object target, String methodName, Class<?> parameterType, Object value) {
-        if (target == null) {
-            return false;
+    private static void applyTaskCpuShare(Binding binding) {
+        if (binding == null || binding.task == null) {
+            throw new IllegalArgumentException("native CPU demand binding requires a task");
         }
-        try {
-            Method method = target.getClass().getMethod(methodName, parameterType);
-            method.invoke(target, value);
-            return true;
-        } catch (NoSuchMethodException e) {
-            return false;
-        } catch (Exception e) {
-            throw new IllegalStateException("failed to invoke " + methodName + " for native CPU binding", e);
+        binding.task.setUtilizationModelCpu(new UtilizationModelDynamic(binding.cpuShare));
+    }
+
+    private static void restoreTaskCpuModel(Binding binding) {
+        if (binding != null && binding.task != null && binding.originalCpuUtilizationModel != null) {
+            binding.task.setUtilizationModelCpu(binding.originalCpuUtilizationModel);
         }
     }
 
@@ -465,6 +468,8 @@ public final class RlNativeResourceBindingManager {
         long vmId = -1L;
         int vmIndex = -1;
         Vm vm;
+        Task task;
+        UtilizationModel originalCpuUtilizationModel;
         VmState vmState;
         RlResourceProfile profile;
         double cpuShare = 1.0;
@@ -505,6 +510,8 @@ public final class RlNativeResourceBindingManager {
             out.effectiveMips = effectiveMips;
             out.effectiveCpuShare = effectiveCpuShare;
             out.capacityMips = capacityMips;
+            out.cpuCapacityPerPeMips = vmState == null ? capacityMips : vmState.currentAppliedMips;
+            out.peCount = vmState == null || vmState.vm == null ? 1L : vmState.vm.getNumberOfPes();
             out.observedAt = Double.isFinite(observedAt) ? observedAt : -1.0;
             out.contentionCount = contentionCount;
             out.contentionContext = contentionContext;
@@ -530,6 +537,8 @@ public final class RlNativeResourceBindingManager {
         public double effectiveMips = 0.0;
         public double effectiveCpuShare = 0.0;
         public double capacityMips = 0.0;
+        public double cpuCapacityPerPeMips = 0.0;
+        public long peCount = 1L;
         public double observedAt = Double.NaN;
         public int contentionCount = 0;
         public String contentionContext = "unobserved";
@@ -560,6 +569,8 @@ public final class RlNativeResourceBindingManager {
             out.put("effective_cpu_mips", effectiveMips);
             out.put("effective_cpu_share", effectiveCpuShare);
             out.put("cpu_capacity_mips", capacityMips);
+            out.put("cpu_capacity_per_pe_mips", cpuCapacityPerPeMips);
+            out.put("pe_count", peCount);
             out.put("contention_count", contentionCount);
             out.put("contention_context", contentionContext);
             out.put("effective_observed_at", observedAt);
@@ -597,6 +608,8 @@ public final class RlNativeResourceBindingManager {
         long vmId;
         int vmIndex;
         Vm vm;
+        Task task;
+        UtilizationModel originalCpuUtilizationModel;
         RlResourceProfile profile;
         double cpuShare;
         double bandwidthShare;
@@ -622,6 +635,8 @@ public final class RlNativeResourceBindingManager {
             out.vmId = binding.vmId;
             out.vmIndex = binding.vmIndex;
             out.vm = binding.vm;
+            out.task = binding.task;
+            out.originalCpuUtilizationModel = binding.originalCpuUtilizationModel;
             out.profile = copyProfile(binding.profile);
             out.cpuShare = binding.cpuShare;
             out.bandwidthShare = binding.bandwidthShare;
@@ -649,6 +664,8 @@ public final class RlNativeResourceBindingManager {
             out.vmId = vmId;
             out.vmIndex = vmIndex;
             out.vm = vm;
+            out.task = task;
+            out.originalCpuUtilizationModel = originalCpuUtilizationModel;
             out.vmState = state;
             out.profile = copyProfile(profile);
             out.cpuShare = cpuShare;

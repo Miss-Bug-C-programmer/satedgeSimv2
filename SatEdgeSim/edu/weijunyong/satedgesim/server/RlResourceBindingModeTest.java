@@ -28,11 +28,15 @@ public class RlResourceBindingModeTest {
         Map<String, Object> nativeMetadata = RlResourceBindingAudit.metadata(nativeProfile);
         require(Boolean.TRUE.equals(nativeMetadata.get("native_scheduler_bound")),
                 "native metadata must claim native scheduler binding");
-        require(Boolean.TRUE.equals(nativeMetadata.get("lower_continuous_allocator_validated_by_satedgesim")),
-                "native metadata must allow lower continuous allocator validation");
-        require(Boolean.TRUE.equals(nativeMetadata.get("full_hybrid_closed_loop_claim_allowed")),
-                "native metadata must allow full closed-loop claims");
-        require("vm_mips_scoped_min_active_share".equals(nativeMetadata.get("native_cpu_binding_scope")),
+        require(Boolean.TRUE.equals(nativeMetadata.get("implemented_in_code")),
+                "native metadata must distinguish code support");
+        require(Boolean.FALSE.equals(nativeMetadata.get("runtime_verified")),
+                "static metadata must not invent runtime observation");
+        require(Boolean.FALSE.equals(nativeMetadata.get("lower_continuous_allocator_validated_by_satedgesim")),
+                "native code support alone must not validate the lower allocator");
+        require(Boolean.FALSE.equals(nativeMetadata.get("full_hybrid_closed_loop_claim_allowed")),
+                "static metadata must not allow full closed-loop claims");
+        require("task_cloudlet_cpu_demand_share".equals(nativeMetadata.get("native_cpu_binding_scope")),
                 "native metadata must expose CPU binding scope");
         require("shared_lan_domain_and_global_wan".equals(nativeMetadata.get("native_network_binding_scope")),
                 "native metadata must expose network binding scope");

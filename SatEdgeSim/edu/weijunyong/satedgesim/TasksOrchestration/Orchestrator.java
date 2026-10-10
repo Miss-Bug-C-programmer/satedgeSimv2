@@ -429,10 +429,28 @@ public abstract class Orchestrator {
 		info.estimatedTaskComputeTimeSec = Math.max(0.0, info.estimatedComputeDelaySec);
 		info.estimatedTaskCompletionTimeSec = Math.max(0.0, info.estimatedTotalDelaySec);
 		ContactForecast forecast = null;
+		// Candidate legality must use the same endpoints consumed by native
+		// TASK transfer progression.  The task payload travels from the current
+		// orchestrator to the selected destination (the edge device ->
+		// orchestrator REQUEST is a separate, target-independent segment).
+		// Evaluating edge-device -> destination here can authorize a target that
+		// native progression immediately rejects with zero transferred bytes.
+		DataCenter nativeTransferSource = task != null && task.getOrchestrator() != null
+				? task.getOrchestrator() : source;
+		boolean nativeTransferLocal = nativeTransferSource != null && destination != null
+				&& nativeTransferSource.getId() == destination.getId();
+		if (!controlledEstimate && !info.isLocalToSource && nativeTransferLocal) {
+			info.linkAvailable = true;
+			info.linkAvailableNow = true;
+			info.linkLifetimeSource = "native_task_transfer_local";
+			info.linkLifetimeCensored = false;
+			info.contactForecastSufficient = true;
+		}
 		if (!controlledEstimate && !info.isLocalToSource && simulationManager != null
-				&& simulationManager.getContactPlan() != null && source != null && destination != null) {
+				&& !nativeTransferLocal && simulationManager.getContactPlan() != null
+				&& nativeTransferSource != null && destination != null) {
 			forecast = simulationManager.getContactPlan().getContactForecast(
-					TopologyOracle.toRef(source), TopologyOracle.toRef(destination),
+					TopologyOracle.toRef(nativeTransferSource), TopologyOracle.toRef(destination),
 					simulationManager.getSimulation().clock(),
 					simulationManager.getContactPlan().getConfiguredHorizonSec());
 			info.linkAvailable = forecast.availableNow;
@@ -445,7 +463,10 @@ public abstract class Orchestrator {
 			info.contactForecastHorizonSec = forecast.effectiveHorizonSec;
 			info.contactForecastSufficient = !forecast.remainingLifetimeCensored;
 		}
-		info.estimatedLinkLifetimeSec = estimateLinkLifetimeSec(simulationManager, source, destination, info, controlledEstimate, forecast);
+		info.estimatedLinkLifetimeSec = nativeTransferLocal
+				? Math.max(0.0, simulationParameters.TOPOLOGY_FORECAST_HORIZON_SEC)
+				: estimateLinkLifetimeSec(simulationManager, nativeTransferSource, destination,
+						info, controlledEstimate, forecast);
 		info.linkSurvivalMarginSec = info.estimatedLinkLifetimeSec - info.estimatedTaskTransmissionTimeSec;
 		info.linkSurvivalMarginToCompletionSec = info.estimatedLinkLifetimeSec - info.estimatedTaskCompletionTimeSec;
 		info.handoverRequired = !info.isLocalToSource && info.linkSurvivalMarginSec < 0.0;

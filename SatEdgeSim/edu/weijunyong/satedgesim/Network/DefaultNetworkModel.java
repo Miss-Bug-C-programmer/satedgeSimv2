@@ -293,10 +293,15 @@ public class DefaultNetworkModel extends NetworkModel {
 					TopologyOracle.toRef(source), TopologyOracle.toRef(destination),
 					simulationManager.getSimulation().clock(),
 					simulationParameters.TOPOLOGY_FORECAST_HORIZON_SEC);
-			if (forecast.availableNow && forecast.currentContactEndSec != null
-					&& !forecast.remainingLifetimeCensored) {
+			if (forecast.availableNow) {
+				// "Evidence available" means the deterministic contact plan
+				// observed the link at this physical instant.  A censored end
+				// time is not absence of current-contact evidence; progression
+				// revalidates availability every network update below.
 				transfer.setContactEvidenceAvailable(true);
-				transfer.setContactEndSec(forecast.currentContactEndSec.doubleValue());
+				if (forecast.currentContactEndSec != null && !forecast.remainingLifetimeCensored) {
+					transfer.setContactEndSec(forecast.currentContactEndSec.doubleValue());
+				}
 			}
 		} catch (RuntimeException unavailable) {
 			// A required contact without physical evidence is fail-closed below.
@@ -304,9 +309,26 @@ public class DefaultNetworkModel extends NetworkModel {
 	}
 
 	private boolean contactClosed(FileTransferProgress transfer) {
-		return ContactEnforcementPolicy.shouldInterrupt(transfer.isContactRequired(),
-				transfer.isContactEvidenceAvailable(), simulationManager.getSimulation().clock(),
-				transfer.getContactEndSec());
+		if (!transfer.isContactRequired()) return false;
+		DataCenter source = transferSource(transfer);
+		DataCenter destination = transferDestination(transfer);
+		if (source == null || destination == null || simulationManager.getContactPlan() == null) return true;
+		try {
+			ContactForecast forecast = simulationManager.getContactPlan().getContactForecast(
+					TopologyOracle.toRef(source), TopologyOracle.toRef(destination),
+					simulationManager.getSimulation().clock(),
+					simulationParameters.TOPOLOGY_FORECAST_HORIZON_SEC);
+			transfer.setContactEvidenceAvailable(true);
+			if (!forecast.availableNow) return true;
+			if (forecast.currentContactEndSec != null && !forecast.remainingLifetimeCensored) {
+				transfer.setContactEndSec(forecast.currentContactEndSec.doubleValue());
+			}
+			return false;
+		} catch (RuntimeException unavailable) {
+			// Contact legality is safety-critical.  A failed authoritative
+			// lookup cannot be converted into favorable availability.
+			return true;
+		}
 	}
 
 	private void failTransferForContact(FileTransferProgress transfer) {

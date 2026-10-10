@@ -1,7 +1,7 @@
 package edu.weijunyong.satedgesim.server;
 
 public final class RlNativeResourceBindingSemantics {
-    public static final String CPU_BINDING_SCOPE = "vm_mips_scoped_min_active_share";
+    public static final String CPU_BINDING_SCOPE = "task_cloudlet_cpu_demand_share";
     public static final String NETWORK_BINDING_SCOPE = "shared_lan_domain_and_global_wan";
     public static final String TX_POWER_BINDING_SCOPE = "wireless_transmission_energy_ratio";
 

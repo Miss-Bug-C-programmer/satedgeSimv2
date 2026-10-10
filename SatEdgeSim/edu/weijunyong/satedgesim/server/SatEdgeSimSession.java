@@ -67,10 +67,35 @@ public class SatEdgeSimSession {
     private String lastPhysicalAdvanceReceiptId;
     private long lastPhysicalAdvanceWorldVersion = -1L;
     private final List<Map<String, Object>> interventionEvidence = new ArrayList<Map<String, Object>>();
+    private final List<Map<String, Object>> outcomeMeasurementEvidence = new ArrayList<Map<String, Object>>();
     private final List<Map<String, Object>> protocolEvents = new ArrayList<Map<String, Object>>();
     private final Map<String, ValidationReceipt> validationReceipts = new LinkedHashMap<String, ValidationReceipt>();
     private final List<Map<String, Object>> persistentRuleRuntimeEffects = new ArrayList<Map<String, Object>>();
+    private final Map<String, OutcomeMeasurementSession> outcomeMeasurementSessions = new LinkedHashMap<String, OutcomeMeasurementSession>();
     private boolean controlEpochPausedForActivation = false;
+
+    /** Server-owned baseline for one fixed post-intervention utility window. */
+    private static final class OutcomeMeasurementSession {
+        private final String measurementSessionId;
+        private final String interventionId;
+        private final double startSimTimeSec;
+        private final double durationSec;
+        private final long configurationVersion;
+        private final Map<String, Object> preMetrics;
+        private final Map<String, Object> preMonitor;
+
+        private OutcomeMeasurementSession(String measurementSessionId, String interventionId,
+                double startSimTimeSec, double durationSec, long configurationVersion,
+                Map<String, Object> preMetrics, Map<String, Object> preMonitor) {
+            this.measurementSessionId = measurementSessionId;
+            this.interventionId = interventionId;
+            this.startSimTimeSec = startSimTimeSec;
+            this.durationSec = durationSec;
+            this.configurationVersion = configurationVersion;
+            this.preMetrics = new LinkedHashMap<String, Object>(preMetrics);
+            this.preMonitor = new LinkedHashMap<String, Object>(preMonitor);
+        }
+    }
 
     private Class<? extends Mobility> mobilityManager = DefaultMobilityModel.class;
     private Class<? extends DataCenter> edgeDatacenter = DefaultDataCenter.class;
@@ -1378,8 +1403,210 @@ public class SatEdgeSimSession {
                     simulationManager.getNetworkModel().getBandwidthConservationEvidence());
         }
         result.put("persistentRuleRuntimeEffects", new ArrayList<Map<String, Object>>(persistentRuleRuntimeEffects));
+        result.put("outcomeMeasurementEvidence", new ArrayList<Map<String, Object>>(outcomeMeasurementEvidence));
         result.put("containsFutureStochasticState", false);
         return jsonSafeMap(result);
+    }
+
+    /**
+     * Server-issued online utility measurement protocol.
+     *
+     * The client supplies only the intervention identity and a fixed window
+     * duration.  Both metric snapshots and the authoritative simulation times
+     * are captured here, so an online controller cannot inject a favorable
+     * scalar or a future/counterfactual label.
+     */
+    @SuppressWarnings("unchecked")
+    public synchronized Map<String, Object> handleOutcomeMeasurement(Map<String, Object> request) {
+        String operation = request == null || request.get("operation") == null
+                ? "" : String.valueOf(request.get("operation")).trim().toLowerCase();
+        if ("start".equals(operation) || "start_outcome_measurement".equals(operation)) {
+            return startOutcomeMeasurement(request);
+        }
+        if ("finalize".equals(operation) || "finalize_outcome_measurement".equals(operation)) {
+            return finalizeOutcomeMeasurement(request);
+        }
+        Map<String, Object> rejected = new LinkedHashMap<String, Object>();
+        rejected.put("receiptType", "outcome_measurement");
+        rejected.put("accepted", false);
+        rejected.put("reason", "unsupported_outcome_measurement_operation");
+        return rejected;
+    }
+
+    private Map<String, Object> startOutcomeMeasurement(Map<String, Object> request) {
+        String interventionId = request == null || request.get("interventionId") == null
+                ? "" : String.valueOf(request.get("interventionId")).trim();
+        Object rawDuration = request == null ? null : request.get("durationSec");
+        if (interventionId.isEmpty() || !(rawDuration instanceof Number)
+                || !Double.isFinite(((Number) rawDuration).doubleValue())
+                || ((Number) rawDuration).doubleValue() <= 0.0) {
+            return outcomeMeasurementRejection("invalid_intervention_or_window", interventionId);
+        }
+        if (!hasAcceptedMaterialIntervention(interventionId)) {
+            return outcomeMeasurementRejection("outcome_window_requires_applied_intervention", interventionId);
+        }
+        double now = simulation == null ? 0.0 : simulation.clock();
+        double duration = ((Number) rawDuration).doubleValue();
+        Map<String, Object> preMetrics = readMetrics();
+        Map<String, Object> preMonitor = getMonitorState();
+        String measurementSessionId = UUID.randomUUID().toString();
+        long configurationVersion = currentConfiguration == null ? 0L : currentConfiguration.version;
+        outcomeMeasurementSessions.put(measurementSessionId, new OutcomeMeasurementSession(
+                measurementSessionId, interventionId, now, duration, configurationVersion,
+                preMetrics, preMonitor));
+        Map<String, Object> response = new LinkedHashMap<String, Object>();
+        response.put("receiptType", "outcome_measurement_start");
+        response.put("accepted", true);
+        response.put("serverIssued", true);
+        response.put("measurementSessionId", measurementSessionId);
+        response.put("interventionId", interventionId);
+        response.put("evaluationWindow", windowMap(now, now + duration, duration));
+        response.put("configurationVersion", configurationVersion);
+        response.put("worldVersion", worldVersion);
+        response.put("controlStateRevision", controlStateRevision);
+        response.put("simulationTimeSec", now);
+        response.put("source", "satedgesim_native_runtime");
+        response.put("futureStochasticTruthUsed", false);
+        response.put("objectiveWeightsVersion", "satedgesim.fixed_runtime_objective.v1");
+        recordProtocolEvent("outcome_measurement_started", response);
+        return jsonSafeMap(response);
+    }
+
+    private Map<String, Object> finalizeOutcomeMeasurement(Map<String, Object> request) {
+        String sessionId = request == null || request.get("measurementSessionId") == null
+                ? "" : String.valueOf(request.get("measurementSessionId")).trim();
+        OutcomeMeasurementSession session = outcomeMeasurementSessions.get(sessionId);
+        if (session == null) {
+            return outcomeMeasurementRejection("unknown_or_consumed_measurement_session", "");
+        }
+        double now = simulation == null ? 0.0 : simulation.clock();
+        if (now + 1.0e-9 < session.startSimTimeSec + session.durationSec) {
+            return outcomeMeasurementRejection("evaluation_window_not_physically_complete", session.interventionId);
+        }
+        Map<String, Object> postMetrics = readMetrics();
+        Map<String, Object> postMonitor = getMonitorState();
+        Map<String, Object> preComponents = utilityComponents(session.preMetrics, session.preMonitor);
+        Map<String, Object> postComponents = utilityComponents(postMetrics, postMonitor);
+        if (preComponents.isEmpty() || postComponents.isEmpty()) {
+            return outcomeMeasurementRejection("mandatory_runtime_metrics_missing", session.interventionId);
+        }
+        String measurementReceiptId = UUID.randomUUID().toString();
+        Map<String, Object> response = new LinkedHashMap<String, Object>();
+        response.put("receiptType", "outcome_measurement");
+        response.put("accepted", true);
+        response.put("serverIssued", true);
+        response.put("measurementReceiptId", measurementReceiptId);
+        response.put("measurementSessionId", session.measurementSessionId);
+        response.put("interventionId", session.interventionId);
+        response.put("source", "satedgesim_native_runtime");
+        response.put("futureStochasticTruthUsed", false);
+        response.put("evaluationWindow", windowMap(session.startSimTimeSec, now, now - session.startSimTimeSec));
+        response.put("preUtilityComponents", preComponents);
+        response.put("postUtilityComponents", postComponents);
+        response.put("objectiveWeightsVersion", "satedgesim.fixed_runtime_objective.v1");
+        response.put("objectiveWeights", fixedObjectiveWeights());
+        response.put("configurationVersionBefore", session.configurationVersion);
+        response.put("configurationVersionAfter", currentConfiguration == null ? 0L : currentConfiguration.version);
+        response.put("worldVersionBefore", worldVersionAtStart(session));
+        response.put("worldVersion", worldVersion);
+        response.put("controlStateRevision", controlStateRevision);
+        response.put("simulationTimeSec", now);
+        response.put("measurementSemantics", "server_metric_snapshots_fixed_post_intervention_window_v1");
+        outcomeMeasurementSessions.remove(sessionId);
+        outcomeMeasurementEvidence.add(new LinkedHashMap<String, Object>(response));
+        while (outcomeMeasurementEvidence.size() > 256) outcomeMeasurementEvidence.remove(0);
+        recordProtocolEvent("outcome_measurement_finalized", response);
+        return jsonSafeMap(response);
+    }
+
+    private boolean hasAcceptedMaterialIntervention(String interventionId) {
+        for (Map<String, Object> evidence : interventionEvidence) {
+            if (evidence == null) continue;
+            Object candidateId = evidence.get("interventionId");
+            if (candidateId == null || !interventionId.equals(String.valueOf(candidateId))) continue;
+            if (!Boolean.TRUE.equals(evidence.get("accepted"))
+                    || !Boolean.TRUE.equals(evidence.get("changed"))) continue;
+            String operationClass = String.valueOf(evidence.get("operationClass"));
+            if ("SELECTIVE_INTERVENTION".equals(operationClass)
+                    || "GLOBAL_SCOPED_INTERVENTION".equals(operationClass)) return true;
+        }
+        return false;
+    }
+
+    private Map<String, Object> outcomeMeasurementRejection(String reason, String interventionId) {
+        Map<String, Object> rejected = new LinkedHashMap<String, Object>();
+        rejected.put("receiptType", "outcome_measurement");
+        rejected.put("accepted", false);
+        rejected.put("serverIssued", false);
+        rejected.put("reason", reason);
+        rejected.put("interventionId", interventionId);
+        rejected.put("simulationTimeSec", simulation == null ? 0.0 : simulation.clock());
+        rejected.put("futureStochasticTruthUsed", false);
+        return rejected;
+    }
+
+    private static Map<String, Object> windowMap(double start, double end, double duration) {
+        Map<String, Object> window = new LinkedHashMap<String, Object>();
+        window.put("start_sim_time", start);
+        window.put("end_sim_time", end);
+        window.put("duration_sec", duration);
+        window.put("semantics", "post_intervention_fixed_v1");
+        return window;
+    }
+
+    private static Map<String, Object> fixedObjectiveWeights() {
+        Map<String, Object> weights = new LinkedHashMap<String, Object>();
+        weights.put("task", 1.0);
+        weights.put("delay", 1.0);
+        weights.put("energy", 1.0);
+        weights.put("deadline", 1.0);
+        weights.put("queue", 1.0);
+        weights.put("configuration", 1.0);
+        return weights;
+    }
+
+    private static double metric(Map<String, Object> metrics, String key) {
+        Object value = metrics == null ? null : metrics.get(key);
+        return value instanceof Number && Double.isFinite(((Number) value).doubleValue())
+                ? ((Number) value).doubleValue() : Double.NaN;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static double monitorWorkload(Map<String, Object> monitor) {
+        Object raw = monitor == null ? null : monitor.get("remainingWorkload");
+        if (!(raw instanceof Map)) return Double.NaN;
+        Object total = ((Map<String, Object>) raw).get("total");
+        return total instanceof Number && Double.isFinite(((Number) total).doubleValue())
+                ? ((Number) total).doubleValue() : Double.NaN;
+    }
+
+    private static Map<String, Object> utilityComponents(Map<String, Object> metrics, Map<String, Object> monitor) {
+        double task = metric(metrics, "tasksFailed");
+        double delay = metric(metrics, "averageEteDelay");
+        double energy = metric(metrics, "energyConsumption");
+        double deadline = metric(metrics, "delayFailureRate");
+        double queue = monitorWorkload(monitor);
+        if (!Double.isFinite(task) || !Double.isFinite(delay) || !Double.isFinite(energy)
+                || !Double.isFinite(deadline) || !Double.isFinite(queue)) {
+            return new LinkedHashMap<String, Object>();
+        }
+        Map<String, Object> components = new LinkedHashMap<String, Object>();
+        components.put("task", task);
+        components.put("delay", delay);
+        components.put("energy", energy);
+        components.put("deadline", deadline);
+        components.put("queue", queue);
+        components.put("configuration", 0.0);
+        double total = task + delay + energy + deadline + queue;
+        components.put("total_cost", total);
+        components.put("rawMetricSemantics", "native_runtime_snapshot");
+        components.put("rawMetrics", new LinkedHashMap<String, Object>(metrics));
+        return components;
+    }
+
+    private long worldVersionAtStart(OutcomeMeasurementSession session) {
+        Object value = session.preMonitor.get("worldVersion");
+        return value instanceof Number ? ((Number) value).longValue() : -1L;
     }
 
     public synchronized Map<String, Object> getProtocolEvents() {

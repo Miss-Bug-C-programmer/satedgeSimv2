@@ -81,7 +81,10 @@ public final class ReconfigurationExecutorContractTest {
         PatchApplicationResult t5 = executor.apply(configuration, resourceOnly, true);
         require(t5.accepted && t5.changed, "T5 resource-only patch must apply");
         require(running.getVm() == vm0, "T5 resource-only patch must preserve placement");
-        require(vm0.getMips() < 1000.0, "T5 must bind CPU resource on the native VM: mips=" + vm0.getMips() + " receipt=" + t5.toMap());
+        require(Math.abs(vm0.getMips() - 1000.0) <= 1.0e-6,
+                "T5 task-local CPU patch must preserve VM capacity");
+        require(Math.abs(running.getUtilizationModelCpu().getUtilization(10.0) - 0.4) <= 1.0e-6,
+                "T5 must bind CPU demand on the native Task/Cloudlet: receipt=" + t5.toMap());
         configuration = configAfter(t5);
 
         ConfigurationPatch noOp = new ConfigurationPatch();

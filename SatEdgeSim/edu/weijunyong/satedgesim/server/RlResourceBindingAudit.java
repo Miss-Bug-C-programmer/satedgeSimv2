@@ -17,21 +17,24 @@ public final class RlResourceBindingAudit {
         out.put("continuous_resource_applied", p.continuousApplied);
         out.put("native_scheduler_bound", p.nativeSchedulerBound());
         out.put("estimator_bound", p.estimatorBound());
-        out.put("full_hybrid_closed_loop_claim_allowed", p.nativeSchedulerBound());
-        out.put("lower_continuous_allocator_validated_by_satedgesim", p.nativeSchedulerBound());
+        out.put("implemented_in_code", p.nativeSchedulerBound());
+        out.put("runtime_verified", false);
+        out.put("publication_eligible", false);
+        out.put("full_hybrid_closed_loop_claim_allowed", false);
+        out.put("lower_continuous_allocator_validated_by_satedgesim", false);
         out.put("native_cpu_binding_scope", RlNativeResourceBindingSemantics.CPU_BINDING_SCOPE);
         out.put("native_network_binding_scope", RlNativeResourceBindingSemantics.NETWORK_BINDING_SCOPE);
         out.put("native_tx_power_binding_scope", RlNativeResourceBindingSemantics.TX_POWER_BINDING_SCOPE);
         out.put("requestedVsEffectiveTrace", "native_runtime_progress_evidence");
         out.put("per_link_bandwidth_allocation_supported", false);
         Map<String, Object> chains = new LinkedHashMap<String, Object>();
-        chains.put("cpuShare", chain("action.cpuShare", "RlNativeResourceBindingManager.vm_mips", "CloudSim VM MIPS + Cloudlet scheduler", "runtime finished-length delta"));
+        chains.put("cpuShare", chain("action.cpuShare", "Task.UtilizationModelDynamic", "CloudSim native Task/Cloudlet + VM scheduler", "runtime finished-length delta"));
         chains.put("bandwidthShare", chain("action.bandwidthShare", "FileTransferProgress.requestedBandwidthShare", "DefaultNetworkModel native transfer progression", "effective LAN/WAN allocation trace"));
         chains.put("txPowerRatio", chain("action.txPowerRatio", "FileTransferProgress.txPowerRatioClamped", "DefaultEnergyModel wireless transmission", "native energy usage"));
         chains.put("queuePriority", chain("action.queuePriority", "not bound", "none", "metadata only; dynamic actuation unsupported"));
         out.put("requestedBoundEffectiveConsumer", chains);
         out.put("table5_title_suggestion", p.nativeSchedulerBound()
-                ? "SatEdgeSim native VM/network/power-bound replay"
+                ? "SatEdgeSim native task-demand/network/power binding (runtime evidence required)"
                 : (p.estimatorBound()
                         ? "SatEdgeSim resource-aware estimator-bound replay"
                         : "SatEdgeSim candidate-level action-mapping replay"));

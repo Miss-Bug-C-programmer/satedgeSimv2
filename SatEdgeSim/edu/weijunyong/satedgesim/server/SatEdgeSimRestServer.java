@@ -358,8 +358,13 @@ public class SatEdgeSimRestServer {
         server.createContext("/intervention_evidence", new JsonHandler() {
             @Override
             protected JsonResponse handleJson(HttpExchange exchange, String body) {
-                requireMethod(exchange, "GET");
                 ensureSession();
+                if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                    Map<String, Object> request = body.trim().isEmpty()
+                            ? new LinkedHashMap<String, Object>() : gson.fromJson(body, Map.class);
+                    return ok(session.handleOutcomeMeasurement(request));
+                }
+                requireMethod(exchange, "GET");
                 return ok(session.getInterventionEvidence());
             }
         });

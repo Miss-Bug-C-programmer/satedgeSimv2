@@ -48,6 +48,12 @@ public class PersistentNativeBindingContractTest {
         Map<?, ?> receipt = (Map<?, ?>) dispatch.get("executionReceipt");
         require(Boolean.TRUE.equals(receipt.get("nativeBindingApplied")), "receipt must expose native binding");
         require(Boolean.TRUE.equals(receipt.get("native_scheduler_bound")), "receipt must expose native mode");
+        require(Boolean.TRUE.equals(receipt.get("nativeCpuDemandBound")),
+                "scheduling receipt must identify the task-local CPU demand binding");
+        require(Boolean.FALSE.equals(receipt.get("nativeCpuMipsBound")),
+                "scheduling receipt must not claim that VM MIPS capacity was rewritten");
+        require(Boolean.FALSE.equals(receipt.get("fullHybridClosedLoopClaimAllowed")),
+                "scheduling alone must not inflate runtime publication eligibility");
 
         // Abstract/tier rules must not enumerate and evaluate the whole VM
         // list before the scoped planner path.  They fall back to the
