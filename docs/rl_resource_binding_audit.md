@@ -10,7 +10,7 @@ This project now exposes three resource-binding modes through `RlResourceBinding
 
 `native_scheduler_bound` is implemented with explicit task-scoped hooks:
 
-1. CPU binding: `RlNativeResourceBindingManager.bindTask(...)` reduces the selected VM's native CloudSim MIPS while the task is active. Because the current SatEdgeSim/CloudSim integration uses VM-wide MIPS rather than a per-cloudlet cap, overlapping native-bound tasks on the same VM use the most restrictive active `cpuShare`. The binding scope is recorded as `vm_mips_scoped_min_active_share`.
+1. CPU binding: `RlNativeResourceBindingManager.bindTask(...)` installs the requested share as the native Task/Cloudlet CPU demand (`UtilizationModelDynamic`). CloudSim's existing Cloudlet and VM schedulers remain the only service allocators; delivered service and conservation are measured from native finished-work deltas. The VM capacity is not rewritten during an orchestration callback. The binding scope is recorded as `task_cloudlet_cpu_demand_share`.
 2. Network binding: `DefaultNetworkModel` attaches the task's active native profile to `FileTransferProgress`. At each native network update, `bandwidthShare` is a requested weight and the effective LAN/WAN service is normalized over the active shared-LAN domain and the global WAN group. The binding scope is `shared_lan_domain_and_global_wan`; this backend does not claim per-link allocation.
 3. Transmit-power binding: `DefaultEnergyModel` scales wireless transmission energy by `txPowerRatio` for transmission events. The binding scope is `wireless_transmission_energy_ratio`.
 4. Completion release: `ExternalRLOrchestrator.resultsReturned(...)` calls `RlDecisionBridge.recordCompletion(...)`, which releases the native VM MIPS binding and records release metadata in the completion receipt.
@@ -21,7 +21,8 @@ The receipt fields that evidence native binding include:
 continuous_resource_binding_mode = native_scheduler_bound
 native_scheduler_bound = true
 native_binding_applied = true
-native_cpu_mips_bound = true
+native_cpu_mips_bound = false
+native_cpu_demand_bound = true
 native_network_bandwidth_bound = true
 native_tx_power_bound = true
 native_base_mips
